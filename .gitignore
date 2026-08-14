@@ -1,0 +1,14 @@
+# ===== 官方平台资源(由 AutoGo 插件初始化/同步, 禁止修改与提交) =====
+AutoGo/
+resources/
+build/
+
+# ===== 本地 IDE / 环境 =====
+.idea/
+.vscode/
+*.iml
+
+# ===== Go 产物 =====
+*.test
+*.out
+cover.out
