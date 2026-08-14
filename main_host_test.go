@@ -89,15 +89,22 @@ func TestHostEngineStartsWithRegisterInjection(t *testing.T) {
 	host.Handle(ui.Command{Type: ui.CommandStart})
 	waitFor(t, func() bool { return host.isRunning() })
 
+	// 注册在 Runtime.Run 内完成，轮询等待注入结果。
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil && host.rt.Scheduler.Count() == 4
+	})
 	host.mu.Lock()
 	scheduler := host.rt.Scheduler
 	guard := host.rt.Guard
 	host.mu.Unlock()
-	if scheduler.Count() != 0 {
-		t.Fatalf("M1 register must leave scheduler empty, got %d", scheduler.Count())
+	// M2a：守卫 1 个（网络联机状态不稳定）+ 矿山任务 4 个。
+	if scheduler.Count() != 4 {
+		t.Fatalf("M2a register must inject 4 mine tasks, got %d", scheduler.Count())
 	}
-	if guard.TrapCount() != 0 {
-		t.Fatalf("M1 register must leave guard empty, got %d", guard.TrapCount())
+	if guard.TrapCount() != 1 {
+		t.Fatalf("M2a register must inject 1 guard trap, got %d", guard.TrapCount())
 	}
 	host.stop()
 	waitFor(t, func() bool { return !host.isRunning() })

@@ -257,6 +257,41 @@ func TestFindMultiColorScanDirection(t *testing.T) {
 	}
 }
 
+func TestFindMultiColorLuaPipeSeparatedOffsets(t *testing.T) {
+	// Lua 特征库的 findMultiColorT offsetColors 用 "|" 分隔三元组
+	// （"dx|dy|color|dx|dy|color|..."），vision 需兼容（逗号格式优先）。
+	img := newFrame(200, 200, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
+		100100: {R: 0xff}, // anchor (100,100)
+		96074:  {G: 0xff}, // offset (-4,-26) -> (96,74)
+		101101: {B: 0xff}, // offset (1,1) -> (101,101)
+	})
+	def := FindDef{
+		Region:       image.Rect(0, 0, 200, 200),
+		FirstColor:   "ff0000-101010",
+		OffsetColors: "-4|-26|00ff00-101010|1|1|0000ff-101010",
+		Sim:          1,
+	}
+	x, y, ok := FindMultiColor(img, def)
+	if !ok || x != 100 || y != 100 {
+		t.Fatalf("expected anchor (100,100) via pipe offsets, got (%d,%d) ok=%v", x, y, ok)
+	}
+}
+
+func TestFindMultiColorPipeOffsetsRequireAll(t *testing.T) {
+	img := newFrame(200, 200, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
+		100100: {R: 0xff}, // anchor only, no offsets
+	})
+	def := FindDef{
+		Region:       image.Rect(0, 0, 200, 200),
+		FirstColor:   "ff0000-101010",
+		OffsetColors: "-4|-26|00ff00-101010|1|1|0000ff-101010",
+		Sim:          1,
+	}
+	if _, _, ok := FindMultiColor(img, def); ok {
+		t.Fatal("pipe offsets must be required for the anchor")
+	}
+}
+
 func TestFindMultiColorMiss(t *testing.T) {
 	img := newFrame(10, 10, color.NRGBA{0, 0, 0, 255}, nil)
 	def := FindDef{Region: image.Rect(0, 0, 10, 10), FirstColor: "ff0000-000000", Sim: 1}

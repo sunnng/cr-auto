@@ -87,6 +87,17 @@ func sleepFragment(ms, stepMs int) {
 	}
 }
 
+// SleepMs 普通休眠（对应 Lua 全局 sleep()；不触发守卫扫描）。
+func SleepMs(ms int) { sleep(ms) }
+
+// Sleep 分片休眠：每片间隙执行守卫扫描（对应 Lua Guard.sleep，供业务模块等待时清弹窗）。
+func Sleep(ms, stepMs int) {
+	if stepMs <= 0 {
+		stepMs = 500
+	}
+	sleepFragment(ms, stepMs)
+}
+
 // Match 单特征比色是否匹配（当前帧）。
 func Match(feature vision.Feature) bool {
 	frame := capture()

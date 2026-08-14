@@ -38,6 +38,17 @@ func New(st *store.Store) *UserConfig {
 	return &UserConfig{st: st}
 }
 
+// Default 返回基于包级默认存储的配置（设备端 main 注入 store.Default 后可用；
+// 对应 Lua 模块级 UserConfig）。
+func Default() *UserConfig { return New(store.Default()) }
+
+// Mine 便捷读取矿山配置段（对应 Lua UserConfig.get("mine")）。
+func Mine() (config.MineConfig, error) {
+	var cfg config.MineConfig
+	err := Default().Get("mine", &cfg)
+	return cfg, err
+}
+
 // Load 返回全部配置段（默认值 + 持久化覆盖合并后的副本）。
 func (u *UserConfig) Load() (map[string]map[string]any, error) {
 	u.mu.Lock()

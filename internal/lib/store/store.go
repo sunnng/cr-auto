@@ -134,6 +134,29 @@ func (s *Store) Incr(key string, delta, def int) (int, error) {
 	return current, nil
 }
 
+// Decode 把 Get 返回的任意值解码到 out（JSON 往返，解决 map 数字为 float64 的问题）。
+// 值不兼容或解码失败时返回错误。
+func Decode(value any, out any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+// Load 读取键并解码到 out；键不存在或值不兼容时返回 false（会话持久化通用入口）。
+func (s *Store) Load(key string, out any) bool {
+	exists, err := s.Has(key)
+	if err != nil || !exists {
+		return false
+	}
+	v, err := s.Get(key, nil)
+	if err != nil {
+		return false
+	}
+	return Decode(v, out) == nil
+}
+
 // Clear 清空存储并落盘。
 func (s *Store) Clear() error {
 	s.mu.Lock()

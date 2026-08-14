@@ -251,7 +251,9 @@ func buildFindPlan(def FindDef) (findPlan, error) {
 	if def.OffsetColors == "" {
 		return plan, nil
 	}
-	offsets := strings.Split(def.OffsetColors, ",")
+	// 兼容两种三元组分隔：逗号（本仓库格式，"dx,dy,color,..."）与
+	// 管道（Lua 特征库 findMultiColorT 原样格式，"dx|dy|color|..."）。
+	offsets := splitOffsetTriplets(def.OffsetColors)
 	if len(offsets)%3 != 0 {
 		return plan, fmt.Errorf("vision: offsetColors 应为 dx,dy,color 三元组: %q", def.OffsetColors)
 	}
@@ -268,6 +270,16 @@ func buildFindPlan(def FindDef) (findPlan, error) {
 		plan.refs = append(plan.refs, offsetSpec{DX: dx, DY: dy, colors: specs})
 	}
 	return plan, nil
+}
+
+// splitOffsetTriplets 把 offsetColors 按三元组分隔拆分：逗号格式优先
+// （颜色元素内可用 "|" 多候选），非三元组长度时回退管道格式（Lua 原样）。
+func splitOffsetTriplets(spec string) []string {
+	parts := strings.Split(spec, ",")
+	if len(parts)%3 == 0 {
+		return parts
+	}
+	return strings.Split(spec, "|")
 }
 
 func findMultiColor(img *image.NRGBA, def FindDef) []image.Point {

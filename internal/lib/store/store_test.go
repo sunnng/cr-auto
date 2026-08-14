@@ -123,3 +123,45 @@ func TestDefaultStoreSettable(t *testing.T) {
 	}
 	SetDefault(nil)
 }
+
+type testRaw struct {
+	FarWaitUntil int64 `json:"farWaitUntil"`
+}
+
+func TestDecodeMapToStruct(t *testing.T) {
+	s := tempStore(t)
+	if err := s.Set("k", map[string]any{"farWaitUntil": float64(1700000000)}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.Get("k", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw testRaw
+	if err := Decode(v, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.FarWaitUntil != 1700000000 {
+		t.Fatalf("decoded=%d", raw.FarWaitUntil)
+	}
+}
+
+func TestDecodeInvalidValueErrors(t *testing.T) {
+	if err := Decode("not-a-map", &testRaw{}); err == nil {
+		t.Fatal("invalid value must fail to decode")
+	}
+}
+
+func TestLoadDecodesIntoStruct(t *testing.T) {
+	s := tempStore(t)
+	if err := s.Set("k", map[string]any{"farWaitUntil": float64(123)}); err != nil {
+		t.Fatal(err)
+	}
+	var raw testRaw
+	if !s.Load("k", &raw) || raw.FarWaitUntil != 123 {
+		t.Fatalf("load=%+v", raw)
+	}
+	if s.Load("missing", &raw) {
+		t.Fatal("missing key must fail to load")
+	}
+}

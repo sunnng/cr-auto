@@ -124,6 +124,9 @@ func (sm *StateMachine) IsTimeout() bool {
 // GetState 当前状态名。
 func (sm *StateMachine) GetState() string { return sm.current }
 
+// Retries 当前状态的主动重试次数（HUD 展示用，对应 Lua sm.retries）。
+func (sm *StateMachine) Retries() int { return sm.retries }
+
 // loopSleep 带守卫分片的 sleep。
 func (sm *StateMachine) loopSleep(ms, interval int) {
 	left := ms
