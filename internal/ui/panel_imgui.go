@@ -124,20 +124,22 @@ func renderConfigWindow(frame *panelFrame) []Command {
 	imgui.SetNextWindowCollapsedV(false, imgui.CondAlways)
 
 	flags := imgui.WindowFlagsNoMove | imgui.WindowFlagsNoResize |
-		imgui.WindowFlagsNoScrollbar | imgui.WindowFlagsNoScrollWithMouse
+		imgui.WindowFlagsNoScrollbar | imgui.WindowFlagsNoScrollWithMouse |
+		imgui.WindowFlagsNoCollapse
 	visible := imgui.BeginV(panelWindowID, nil, flags)
 	var commands []Command
 	if visible {
 		frame.ActiveTab = int32(NormalizeConfigTab(ConfigTab(frame.ActiveTab)))
+		if renderTitleBarMinimizeButton() {
+			minimizeToPill(frame)
+		}
 		// AutoGo's PushFont wrapper cannot accept nil like native Dear ImGui can.
 		// Scale the panel window instead; child windows inherit this value.
 		imgui.SetWindowFontScale(0.86)
 		if frame.ActiveTab == 3 {
 			syncDetectionPreviewTexture(frame.Preview)
 		}
-		if renderHeader(frame.Status) {
-			minimizeToPill(frame)
-		}
+		renderHeader(frame.Status)
 		imgui.Separator()
 
 		available := imgui.ContentRegionAvail()
@@ -555,7 +557,53 @@ func pushKingdomGeometry() int32 {
 	return 10
 }
 
-func renderHeader(status RuntimeStatus) bool {
+const (
+	panelTitleBarButtonWidth  = float32(42)
+	panelTitleBarButtonHeight = float32(34)
+	panelTitleBarButtonRight  = float32(10)
+	panelTitleBarButtonTop    = float32(7)
+)
+
+func renderTitleBarMinimizeButton() bool {
+	windowPos := imgui.WindowPos()
+	windowSize := imgui.WindowSize()
+	minimum := imgui.Vec2{
+		X: windowPos.X + windowSize.X - panelTitleBarButtonRight - panelTitleBarButtonWidth,
+		Y: windowPos.Y + panelTitleBarButtonTop,
+	}
+	maximum := imgui.Vec2{
+		X: minimum.X + panelTitleBarButtonWidth,
+		Y: minimum.Y + panelTitleBarButtonHeight,
+	}
+
+	mouse := imgui.MousePos()
+	hovered := mouse.X >= minimum.X && mouse.X <= maximum.X &&
+		mouse.Y >= minimum.Y && mouse.Y <= maximum.Y
+	clicked := hovered && imgui.IsMouseClickedBoolV(imgui.MouseButtonLeft, false)
+
+	drawList := imgui.WindowDrawList()
+	drawList.PushClipRectFullScreen()
+	if hovered {
+		drawList.AddRectFilledV(
+			minimum,
+			maximum,
+			imgui.ColorU32Vec4(imgui.Vec4{X: 0.35, Y: 0.26, Z: 0.16, W: 0.9}),
+			7,
+			imgui.DrawFlagsRoundCornersAll,
+		)
+	}
+	centerY := minimum.Y + panelTitleBarButtonHeight/2
+	drawList.AddLineV(
+		imgui.Vec2{X: minimum.X + 12, Y: centerY},
+		imgui.Vec2{X: maximum.X - 12, Y: centerY},
+		imgui.ColorU32Vec4(colorCream),
+		2.5,
+	)
+	drawList.PopClipRect()
+	return clicked
+}
+
+func renderHeader(status RuntimeStatus) {
 	colorText(colorGold, "CR AUTO")
 	imgui.SameLine()
 	imgui.TextUnformatted("饼干王国自动化")
@@ -563,12 +611,6 @@ func renderHeader(status RuntimeStatus) bool {
 	profile := "CN 1600×900  ·  240dpi"
 	alignTextRight(profile, 104)
 	colorText(colorMuted, profile)
-	imgui.SameLine()
-	buttonX := imgui.WindowWidth() - 78
-	if buttonX > imgui.CursorPosX() {
-		imgui.SetCursorPosX(buttonX)
-	}
-	minimize := centeredButton("收起", "header-compact", imgui.Vec2{X: 58, Y: 30}, colorCream)
 
 	phase := phaseLabel(status.Phase)
 	statusText := "● " + phase + "   场景 " + fallback(status.Scene, "unknown") + "   状态 " + fallback(status.Outcome, "configure")
@@ -585,7 +627,6 @@ func renderHeader(status RuntimeStatus) bool {
 	if status.Message != "" {
 		disabledText(status.Message)
 	}
-	return minimize
 }
 
 func renderSidebar(frame *panelFrame) {

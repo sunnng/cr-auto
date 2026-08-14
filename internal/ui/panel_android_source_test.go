@@ -55,8 +55,21 @@ func TestAndroidPanelIsFixedAndCanBeMinimized(t *testing.T) {
 	if !strings.Contains(content, "imgui.WindowFlagsNoMove") {
 		t.Fatal("main panel must reject move gestures")
 	}
-	if strings.Contains(content, "imgui.WindowFlagsNoCollapse") {
-		t.Fatal("main panel must expose ImGui's native minimize/restore control")
+	if !strings.Contains(content, "imgui.WindowFlagsNoCollapse") {
+		t.Fatal("main panel must hide the native collapse arrow in favor of the title-bar minimize control")
+	}
+	for _, required := range []string{
+		"renderTitleBarMinimizeButton()",
+		"PushClipRectFullScreen()",
+		"AddLineV(",
+		"IsMouseClickedBoolV(imgui.MouseButtonLeft, false)",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("title-bar minimize control is missing %s", required)
+		}
+	}
+	if strings.Contains(content, `centeredButton("收起"`) || strings.Contains(content, `"header-compact"`) {
+		t.Fatal("minimize control must not remain in the content header")
 	}
 }
 
