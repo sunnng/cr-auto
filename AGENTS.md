@@ -11,8 +11,13 @@ Cookie Run: Kingdom (CRK) automation bot built on [AutoGo](https://autogo.cc/), 
 
 ## Repo layout
 
-- Root module `app`: `main.go` boots the ImGui panel, consumes its `Command`s, and registers `apkctl.RegEvent` lifecycle hooks. Engine/task domain arrives in later milestones (see `docs/adr/`).
+- Root module `app`: `main.go` boots the ImGui panel, consumes its `Command`s, injects device adapters (截图隐身 frame source, AutoGo motion/log), and hosts the engine runtime (`main_host.go`, desktop-testable).
 - `internal/ui/`: self-contained ImGui control panel + floating pill HUD, migrated from auto-cookie. Imports no domain package; hosts publish state via `Publish*` and consume user actions as `Command`s. `panel_imgui.go` (`//go:build android && cgo`) is the real renderer, `panel_nocgo.go` is the desktop stub — **desktop-testable**: `go test ./internal/ui`.
+- `internal/vision/`: frame-based pure Go 比色/找色 (ADR-0003) — parses `"x|y|rrggbb-偏色"` 特征库 strings + sim, `FindMultiColor` region search. No AutoGo screen APIs; desktop-testable with saved frames.
+- `internal/core/`: engine domain ported 结构直译 from the Lua project's `core/` — 守卫 `guard.go`, 调度器 `scheduler.go` (tasks + idle providers), 状态机 `statemachine.go` (KEEP/RETRY/DONE runner), 主循环 `runtime.go`. All desktop-testable.
+- `internal/game/`: `taskbuilder.go` (standard task wrapper: 开关/就绪/让渡/离开广场) + `register.go` (M1 skeleton; game modules registered in M2 per ADR-0002).
+- `internal/lib/`: 结构直译 from Lua `lib/` — `color.go` (frame facade over vision), `touch.go` (seam-injected AutoGo motion), `store.go` (JSON 会话存储), `userconfig.go` (defaults + persisted merge), `logger.go`/`status.go` (injectable sinks).
+- `internal/config/`: 打包常量 (display/runtime/user defaults), mirrors `config.lua`.
 - `AutoGo/`: local copy of the AutoGo SDK (`github.com/Dasongzi1366/AutoGo`, wired in via `replace`). Treat as third-party — don't edit; update through the plugin's SDK update feature.
 - `CONTEXT.md`: UI-layer domain glossary (Chinese, with terms to avoid); `docs/adr/`: architectural decisions.
 - `docs/autogo-api-2026.6.6.md`: full AutoGo API reference (Chinese) exported from autogo.cc. Read it before writing AutoGo calls.
