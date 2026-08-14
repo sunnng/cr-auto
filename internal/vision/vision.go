@@ -152,7 +152,7 @@ type ColorSpec struct {
 	Tol     uint8
 }
 
-// ParseColorSpec 解析 "FFFFFF|CCCCCC-101010" 风格的颜色串（多个候选以 "|" 分隔）。
+// ParseColorSpec 解析 "FFFFFF|CCCCCC-101010" 风格的颜色规格串（多个候选以 "|" 分隔）。
 func ParseColorSpec(spec string) []ColorSpec {
 	var out []ColorSpec
 	for _, part := range strings.Split(spec, "|") {
@@ -210,7 +210,7 @@ type FindDef struct {
 	Sim          float32
 }
 
-// FindMultiColor 在区域内查找匹配的多点颜色序列，返回首个命中锚点的坐标。
+// FindMultiColor 在区域内查找匹配的多点颜色序列，返回首个命中点的坐标。
 func FindMultiColor(img *image.NRGBA, def FindDef) (x, y int, ok bool) {
 	if img == nil {
 		return 0, 0, false
@@ -223,7 +223,7 @@ func FindMultiColor(img *image.NRGBA, def FindDef) (x, y int, ok bool) {
 	return first.X, first.Y, true
 }
 
-// FindMultiColorAll 在区域内查找全部匹配锚点，按扫描方向排序。
+// FindMultiColorAll 在区域内查找全部命中点，按扫描方向排序。
 func FindMultiColorAll(img *image.NRGBA, def FindDef) []image.Point {
 	if img == nil {
 		return nil
@@ -233,7 +233,13 @@ func FindMultiColorAll(img *image.NRGBA, def FindDef) []image.Point {
 
 type findPlan struct {
 	first []ColorSpec
-	refs  []Point
+	refs  []offsetSpec
+}
+
+// offsetSpec 找色定义中的一条相对色点：偏移量 + 候选颜色（"|" 分隔可多选）。
+type offsetSpec struct {
+	DX, DY int
+	colors []ColorSpec
 }
 
 func buildFindPlan(def FindDef) (findPlan, error) {
@@ -259,7 +265,7 @@ func buildFindPlan(def FindDef) (findPlan, error) {
 		if len(specs) == 0 {
 			return plan, fmt.Errorf("vision: offset 颜色非法: %q", offsets[i+2])
 		}
-		plan.refs = append(plan.refs, Point{X: dx, Y: dy, R: specs[0].R, G: specs[0].G, B: specs[0].B, Tol: specs[0].Tol})
+		plan.refs = append(plan.refs, offsetSpec{DX: dx, DY: dy, colors: specs})
 	}
 	return plan, nil
 }
@@ -284,7 +290,7 @@ func findMultiColor(img *image.NRGBA, def FindDef) []image.Point {
 			seq = append(seq, image.Point{X: x, Y: y})
 		}
 	}
-	reverseScan(seq, def.Dir)
+	orderScanByDir(seq, def.Dir)
 
 	anchors := make([]image.Point, 0)
 	for _, c := range seq {
@@ -293,7 +299,7 @@ func findMultiColor(img *image.NRGBA, def FindDef) []image.Point {
 		}
 		matched := 0
 		for _, ref := range plan.refs {
-			if colorSpecNear(img, c.X+ref.X, c.Y+ref.Y, ColorSpec{R: ref.R, G: ref.G, B: ref.B, Tol: ref.Tol}) {
+			if anyColorSpecNear(img, c.X+ref.DX, c.Y+ref.DY, ref.colors) {
 				matched++
 			}
 		}
@@ -305,8 +311,8 @@ func findMultiColor(img *image.NRGBA, def FindDef) []image.Point {
 	return anchors
 }
 
-// reverseScan 按 dir 调整扫描顺序：0 左上→右下，1 右上→左下，2 左下→右上，3 右下→左上。
-func reverseScan(seq []image.Point, dir int) {
+// orderScanByDir 按 dir 调整扫描顺序：0 左上→右下，1 右上→左下，2 左下→右上，3 右下→左上。
+func orderScanByDir(seq []image.Point, dir int) {
 	if len(seq) <= 1 || dir == 0 {
 		return
 	}

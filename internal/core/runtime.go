@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"app/internal/config"
+	"app/internal/lib/color"
 	"app/internal/lib/logger"
 	"app/internal/lib/status"
 )
@@ -86,13 +87,19 @@ func (rt *Runtime) Resume() {
 	close(rt.resume)
 }
 
-// Run 永久运行：清理 → 注册 → 主线程调度 + 守卫；ctx 取消或调度异常时返回。
+// Run 永久运行：清理 → 注册 → 主循环调度 + 守卫；ctx 取消或调度异常时返回。
 func (rt *Runtime) Run(ctx context.Context) error {
 	defer close(rt.done)
 
 	rt.Scheduler.Clear()
 	rt.Guard.Clear()
 	status.Set(status.PhaseRun, "运行中")
+
+	// 对应 Lua runtime.lua 的 Color.setGuardHook(Guard.check)：
+	// wait/sleep 分片轮询内由 lib/color 的 TickGuard 扫描弹窗。
+	color.SetGuardHook(func() { rt.Guard.Check() })
+	defer color.SetGuardHook(nil)
+
 	if rt.Register != nil {
 		rt.Register()
 	}
@@ -166,7 +173,7 @@ func (rt *Runtime) idleWait(ctx context.Context) bool {
 	return ctx.Err() == nil
 }
 
-// calcIdleWait 计算所有空闲提供者的最大等待秒数与 HUD 文本。
+// calcIdleWait 计算所有空闲提供者的最大等待秒数与等待提示文本。
 func (rt *Runtime) calcIdleWait() (waitRemain int, hudText string) {
 	var parts []string
 	for name, provider := range rt.Scheduler.GetIdleProviders() {

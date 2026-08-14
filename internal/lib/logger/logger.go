@@ -21,11 +21,11 @@ type Sink func(level Level, tag string, message string)
 
 var (
 	mu   sync.RWMutex
-	now  = LevelDebug
+	now  = LevelInfo // Lua logger.lua 默认 level=3（INFO）
 	sink Sink
 )
 
-// SetLevel 设置最小输出级别（默认 Debug）。
+// SetLevel 设置最小输出级别（默认 Info，对应 Lua logger.level=3）。
 func SetLevel(level Level) {
 	mu.Lock()
 	defer mu.Unlock()

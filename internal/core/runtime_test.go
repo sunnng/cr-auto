@@ -2,11 +2,33 @@ package core
 
 import (
 	"context"
+	"image"
 	"testing"
 	"time"
 
+	"app/internal/lib/color"
 	"app/internal/lib/status"
+	"app/internal/vision"
 )
+
+// frameSourceSeq 顺序帧来源（耗尽后重复最后一帧）。
+type frameSourceSeq struct {
+	frames []*image.NRGBA
+	idx    int
+}
+
+func (f *frameSourceSeq) Capture() (*image.NRGBA, error) {
+	frame := f.frames[f.idx]
+	if f.idx < len(f.frames)-1 {
+		f.idx++
+	}
+	return frame, nil
+}
+
+// blackFrame 10x10 黑帧。
+func blackFrame() *image.NRGBA {
+	return redFrameAt()
+}
 
 // installStatusSink 记录 status 发布序列。
 func installStatusSink(t *testing.T) func() []status.Update {
@@ -192,4 +214,46 @@ func TestRuntimeCancelStopsLoop(t *testing.T) {
 	go rt.Run(ctx)
 	cancel()
 	waitDone(t, rt)
+}
+
+func TestRuntimeWiresGuardHookIntoColorWait(t *testing.T) {
+	// 帧序列：第 0 帧（轮首守卫扫描）与第 1 帧（任务内首次识别）无弹窗，
+	// 第 2 帧起弹窗出现 —— 只能由 wait 分片内的 TickGuard（= Guard.Check）命中。
+	frames := []*image.NRGBA{blackFrame(), blackFrame(), redFrameAt(1001), redFrameAt(1001)}
+	color.SetFrameSource(&frameSourceSeq{frames: frames})
+	color.SetSleep(func(ms int) {})
+	defer func() {
+		color.SetFrameSource(nil)
+		color.SetSleep(nil)
+	}()
+
+	sched := NewScheduler()
+	guard := NewGuard()
+	handled := 0
+
+	rt := newTestRuntime(sched, guard)
+	rt.Register = func() {
+		guard.Register("弹窗", vision.Feature{Points: "1|1|ff0000-000000"},
+			func() { handled++ }, 10)
+		sched.Add("waitTask", func() bool { return true }, func() error {
+			// 永不命中的特征 → 进入 wait 轮询，期间依赖守卫钩子清弹窗。
+			color.Wait(vision.Feature{Points: "2|2|00ff00-000000"}, 500, 5)
+			return nil
+		})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go rt.Run(ctx)
+	defer cancel()
+
+	waitFor(t, func() bool { return handled >= 1 })
+	cancel()
+	waitDone(t, rt)
+
+	// 停止后守卫钩子必须注销。
+	before := handled
+	color.TickGuard()
+	if handled != before {
+		t.Fatal("guard hook must be unregistered after runtime stops")
+	}
 }

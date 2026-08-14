@@ -20,7 +20,7 @@ type Task struct {
 	Action    func() error
 }
 
-// IdleProvider 空闲等待提供者：返回距离下次可运行的等待秒数与 HUD 文本。
+// IdleProvider 空闲等待提供者：返回距离下次可运行的等待秒数与等待提示文本。
 type IdleProvider func() (remainSec int, label string)
 
 // Scheduler 对应 Lua 工程的 core/scheduler.lua：条件任务串行执行。
@@ -82,10 +82,12 @@ func (s *Scheduler) Run(stopOnError bool) (hasWork bool, ok bool) {
 
 	for _, task := range s.tasks {
 		condOk := true
+		panicked := false
 		func() {
 			defer func() {
 				if recover() != nil {
 					condOk = false
+					panicked = true
 				}
 			}()
 			if !task.Condition() {
@@ -93,6 +95,9 @@ func (s *Scheduler) Run(stopOnError bool) (hasWork bool, ok bool) {
 			}
 		}()
 		if !condOk {
+			if panicked {
+				logger.Warn(schedulerTag, "[条件] %s 异常，本轮跳过", task.Name)
+			}
 			skipped = append(skipped, task.Name)
 			continue
 		}

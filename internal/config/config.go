@@ -10,6 +10,7 @@ type Display struct {
 // Runtime 主循环运行时配置（core.runtime）。
 type Runtime struct {
 	GuardIntervalMS int // 主线程守卫分片间隔（wait/sleep/状态机轮询）
+	GuardSleepMS    int // 保留字段（旧守卫线程用，现未使用）
 	StopOnError     bool
 	StepDelayMS     int // 有任务时轮间间隔
 	IdleDelayMS     int // 没任务时挂机间隔
@@ -102,6 +103,7 @@ var Static = struct {
 	Display: Display{Width: 1600, Height: 900},
 	Runtime: Runtime{
 		GuardIntervalMS: 500,
+		GuardSleepMS:    1000,
 		StopOnError:     false,
 		StepDelayMS:     5000,
 		IdleDelayMS:     30000,

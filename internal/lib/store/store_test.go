@@ -46,13 +46,26 @@ func TestPersistenceAcrossInstances(t *testing.T) {
 	}
 }
 
-func TestCorruptFileFailsLoad(t *testing.T) {
+func TestCorruptFileResetsToEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(path).Get("k", nil); err == nil {
-		t.Fatal("corrupt store must surface a load error")
+	s := New(path)
+	v, err := s.Get("k", 42)
+	if err != nil || v != 42 {
+		t.Fatalf("corrupt store must fall back to defaults: got=%v err=%v", v, err)
+	}
+	// 下次写入必须覆盖损坏文件。
+	if err := s.Set("k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) == "{not json" {
+		t.Fatal("corrupt store must be overwritten on save")
 	}
 }
 
@@ -74,11 +87,15 @@ func TestDelAndHas(t *testing.T) {
 
 func TestIncr(t *testing.T) {
 	s := tempStore(t)
-	if v, err := s.Incr("count", 1); err != nil || v != 1 {
+	if v, err := s.Incr("count", 1, 0); err != nil || v != 1 {
 		t.Fatalf("first Incr=%d err=%v", v, err)
 	}
-	if v, err := s.Incr("count", 2); err != nil || v != 3 {
+	if v, err := s.Incr("count", 2, 0); err != nil || v != 3 {
 		t.Fatalf("second Incr=%d err=%v", v, err)
+	}
+	// 缺省值参数：键不存在时从 def 起算。
+	if v, err := s.Incr("fresh", 1, 10); err != nil || v != 11 {
+		t.Fatalf("Incr with default=%d err=%v", v, err)
 	}
 }
 

@@ -214,6 +214,24 @@ func TestFindMultiColorAnyFirstColor(t *testing.T) {
 	_ = img
 }
 
+func TestFindMultiColorOffsetColorAlternates(t *testing.T) {
+	// 相对色点支持 "|" 分隔的多候选：偏移 (1,1) 命中 绿 或 蓝 都算。
+	img := newFrame(10, 10, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
+		2002: {R: 0xff}, // 命中点
+		3003: {B: 0xff}, // 偏移 (1,1) = 蓝
+	})
+	def := FindDef{
+		Region:       image.Rect(0, 0, 10, 10),
+		FirstColor:   "ff0000-000000",
+		OffsetColors: "1,1,00ff00-000000|0000ff-000000",
+		Sim:          1,
+	}
+	x, y, ok := FindMultiColor(img, def)
+	if !ok || x != 2 || y != 2 {
+		t.Fatalf("expected anchor via alternate offset color, got (%d,%d) ok=%v", x, y, ok)
+	}
+}
+
 func TestFindMultiColorScanDirection(t *testing.T) {
 	img := newFrame(10, 10, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
 		1001: {R: 0xff}, 8008: {G: 0xff},

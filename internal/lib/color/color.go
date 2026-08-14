@@ -14,6 +14,13 @@ import (
 
 const tag = "[Color]"
 
+// 轮询缺省参数（对应 Lua lib/color.lua 的 `or 10000` / `or 500` / `or 800`）。
+const (
+	defaultTimeoutMs  = 10000
+	defaultIntervalMs = 500
+	defaultTapDelayMs = 800
+)
+
 // FrameSource 帧来源：每次识别获取一帧。
 type FrameSource interface {
 	Capture() (*image.NRGBA, error)
@@ -116,10 +123,10 @@ func Any(target any) (bool, int) {
 // Wait 轮询直到 target 命中。
 func Wait(target any, timeoutMs, intervalMs int) (bool, int) {
 	if timeoutMs <= 0 {
-		timeoutMs = 10000
+		timeoutMs = defaultTimeoutMs
 	}
 	if intervalMs <= 0 {
-		intervalMs = 500
+		intervalMs = defaultIntervalMs
 	}
 	if ok, which := Any(target); ok {
 		return true, which
@@ -137,10 +144,10 @@ func Wait(target any, timeoutMs, intervalMs int) (bool, int) {
 // WaitMatch 轮询直到单特征匹配；命中后可选额外等待。
 func WaitMatch(feature vision.Feature, timeoutMs, intervalMs, sleepMs int) bool {
 	if timeoutMs <= 0 {
-		timeoutMs = 10000
+		timeoutMs = defaultTimeoutMs
 	}
 	if intervalMs <= 0 {
-		intervalMs = 500
+		intervalMs = defaultIntervalMs
 	}
 	if Match(feature) {
 		if sleepMs > 0 {
@@ -164,10 +171,10 @@ func WaitMatch(feature vision.Feature, timeoutMs, intervalMs, sleepMs int) bool 
 // WaitGone 轮询直到特征不再匹配。
 func WaitGone(target any, timeoutMs, intervalMs int) bool {
 	if timeoutMs <= 0 {
-		timeoutMs = 10000
+		timeoutMs = defaultTimeoutMs
 	}
 	if intervalMs <= 0 {
-		intervalMs = 500
+		intervalMs = defaultIntervalMs
 	}
 	if ok, _ := Any(target); !ok {
 		return true
@@ -200,10 +207,10 @@ func TapUntilMatch(tapTarget any, feature any, opts TapOpts) (bool, int) {
 		opts.TimeoutMs = 15000
 	}
 	if opts.IntervalMs <= 0 {
-		opts.IntervalMs = 500
+		opts.IntervalMs = defaultIntervalMs
 	}
 	if opts.TapDelayMs <= 0 {
-		opts.TapDelayMs = 800
+		opts.TapDelayMs = defaultTapDelayMs
 	}
 
 	tapCount := 0
@@ -247,7 +254,7 @@ func performTap(target any, tapDelayMs int) bool {
 	}
 }
 
-// Find 在区域内找色，返回首个命中锚点坐标。
+// Find 在区域内找色，返回首个命中点坐标。
 func Find(def vision.FindDef) (x, y int, ok bool) {
 	frame := capture()
 	if frame == nil {

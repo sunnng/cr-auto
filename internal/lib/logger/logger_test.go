@@ -39,6 +39,7 @@ func TestNilSinkDiscards(t *testing.T) {
 func TestAllLevels(t *testing.T) {
 	snapshot, restore := recorder(t)
 	defer restore()
+	SetLevel(LevelDebug)
 	Debug("T", "d")
 	Info("T", "i")
 	Warn("T", "w")

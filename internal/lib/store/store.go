@@ -41,7 +41,8 @@ func (s *Store) load() (map[string]any, error) {
 	raw, err := os.ReadFile(s.path)
 	if err == nil && len(raw) > 0 {
 		if err := json.Unmarshal(raw, &data); err != nil {
-			return nil, err
+			// 损坏文件按 Lua store.lua 语义重置为空：下次写入时覆盖，不阻塞读写。
+			data = map[string]any{}
 		}
 	}
 	s.cache = data
@@ -110,15 +111,15 @@ func (s *Store) Has(key string) (bool, error) {
 	return ok && v != nil, nil
 }
 
-// Incr 数值自增/自减，返回新值。
-func (s *Store) Incr(key string, delta int) (int, error) {
+// Incr 数值自增/自减（键不存在时从 def 起算），返回新值。
+func (s *Store) Incr(key string, delta, def int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	data, err := s.load()
 	if err != nil {
 		return 0, err
 	}
-	current := 0
+	current := def
 	switch v := data[key].(type) {
 	case float64:
 		current = int(v)

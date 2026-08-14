@@ -54,15 +54,13 @@ func TapR(x, y int, delayMs int) {
 // TapXy TapR 的别名。
 func TapXy(x, y, delayMs int) { TapR(x, y, delayMs) }
 
-// TapArea 在矩形区域内随机点击。
+// TapArea 在矩形区域内随机点击（含右/下边界，对应 Lua math.random(min,max)）。
 func TapArea(rect image.Rectangle, delayMs int) {
 	x := rect.Min.X
 	y := rect.Min.Y
-	if dx := rect.Dx(); dx > 0 && perform.Random != nil {
-		x = rect.Min.X + perform.Random(0, dx-1)
-	}
-	if dy := rect.Dy(); dy > 0 && perform.Random != nil {
-		y = rect.Min.Y + perform.Random(0, dy-1)
+	if perform.Random != nil {
+		x = rect.Min.X + perform.Random(0, rect.Dx())
+		y = rect.Min.Y + perform.Random(0, rect.Dy())
 	}
 	TapR(x, y, delayMs)
 }
@@ -111,9 +109,19 @@ func SwipeEx(opts SwipeOpts) bool {
 	if id == 0 {
 		id = defaultFingerID
 	}
-	moveMs := max(1, opts.MoveMs)
-	holdMs := max(0, opts.HoldMs)
-	downMs := max(0, opts.DownMs)
+	// 缺省参数对应 Lua：moveMs 600、holdMs 200、downMs 50、steps 1、pauseMs/upMs 0。
+	moveMs := opts.MoveMs
+	if moveMs <= 0 {
+		moveMs = 600
+	}
+	holdMs := opts.HoldMs
+	if holdMs <= 0 {
+		holdMs = 200
+	}
+	downMs := opts.DownMs
+	if downMs <= 0 {
+		downMs = 50
+	}
 	steps := max(1, opts.Steps)
 	pauseMs := max(0, opts.PauseMs)
 	upMs := max(0, opts.UpMs)
