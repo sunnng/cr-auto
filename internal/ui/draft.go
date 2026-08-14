@@ -1,6 +1,8 @@
-// The panel's local settings draft. It holds only the fields the ImGui
-// renderer reads and edits; persistence, schema migration and time-window
-// rules are host responsibilities that arrive through the command seam.
+// The panel's local settings draft. It holds the UI-editable configuration
+// surface: the field groups the ImGui renderer reads and edits (Run, Safety,
+// Tasks) plus field groups reserved for future pages (Production, HUD,
+// Plans). Persistence, schema migration and time-window rules are host
+// responsibilities that arrive through the command seam.
 package ui
 
 import (
