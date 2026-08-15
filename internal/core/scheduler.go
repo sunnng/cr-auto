@@ -74,6 +74,15 @@ func (s *Scheduler) Clear() {
 // Count 任务数量。
 func (s *Scheduler) Count() int { return len(s.tasks) }
 
+// Names 按注册顺序返回全部任务名（测试/诊断用）。
+func (s *Scheduler) Names() []string {
+	names := make([]string, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
 // Run 执行一轮：按注册顺序串行执行条件满足的任务。
 // stopOnError 时遇 panic 返回 ok=false；返回本轮是否有任务执行。
 func (s *Scheduler) Run(stopOnError bool) (hasWork bool, ok bool) {

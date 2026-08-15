@@ -1,8 +1,8 @@
 // cr-auto 是《冲呀！饼干人：王国》的 AutoGo 视觉自动化入口。
-// 当前里程碑：M2a 守卫 + 矿山模块 —— 自包含 ImGui 控制面板（internal/ui）已迁移；
+// 当前里程碑：M2b 全量业务模块 —— 自包含 ImGui 控制面板（internal/ui）已迁移；
 // 引擎/任务层（internal/core + internal/lib + internal/vision，按 ADR-0002 结构直译、
 // ADR-0003 帧比色）已接入：面板命令驱动主循环（守卫→调度→空闲等待）。
-// M2a 已迁移矿山模块（见 internal/game/register.go）。
+// M2b 已迁移矿山模块与广场/交易所/竞技场/繁星岛/洗脆饼模块（见 internal/game/register.go）。
 package main
 
 import (
@@ -34,7 +34,7 @@ func main() {
 		Phase:     "idle",
 		Scene:     "unknown",
 		Outcome:   "configure",
-		Message:   "确认配置后启动；M1 引擎底座已接入，M2a 矿山模块（勘查/开采/战斗/解除洋菜冻）已注册",
+		Message:   "确认配置后启动；M2b 全量业务模块已注册（矿山/广场/交易所/竞技场/繁星岛/洗脆饼）",
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
 	if err := panel.Open(ui.Snapshot{

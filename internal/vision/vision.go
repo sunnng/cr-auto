@@ -136,6 +136,29 @@ func Match(img *image.NRGBA, f Feature) bool {
 	return matched >= requiredPoints(f.Sim, len(points))
 }
 
+// MatchRGB 单点比色是否匹配（对应 Lua cmpColor(x, y, color, sim)）。
+// spec 为 "rrggbb[-偏色]" 颜色规格串（可带候选）；sim>0 时按相似度阈值匹配，
+// 通道容差取 (1-sim)*255（如 sim=0.95 → ±12），sim<=0 时按 spec 自带偏色容差。
+func MatchRGB(img *image.NRGBA, x, y int, spec string, sim float32) bool {
+	if img == nil {
+		return false
+	}
+	specs := ParseColorSpec(spec)
+	if len(specs) == 0 {
+		return false
+	}
+	for _, s := range specs {
+		check := s
+		if sim > 0 {
+			check.Tol = uint8((1 - sim) * 255)
+		}
+		if colorSpecNear(img, x, y, check) {
+			return true
+		}
+	}
+	return false
+}
+
 // MatchAny 多个特征任一匹配，返回命中的下标（0 起），未命中返回 -1。
 func MatchAny(img *image.NRGBA, features []Feature) (bool, int) {
 	for i, f := range features {

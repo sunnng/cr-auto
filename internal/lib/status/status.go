@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"app/internal/lib/color"
 )
 
 // Phase 运行阶段。
@@ -184,6 +186,50 @@ func SetMineBattle(opts MineBattle) {
 type MineWait struct {
 	SurveySec, MiningSec, MarketSec int
 	Extra                           string
+}
+
+// BiscuitReroll 洗脆饼 HUD 字段（对应 Lua StatusHud.setBiscuitReroll）。
+type BiscuitReroll struct {
+	Current, Max int
+	HasCurrent   bool // 对应 Lua opts.current 是否传入（0 为真值）
+	Extra        string
+}
+
+// SetBiscuitReroll 洗脆饼进度发布（对应 Lua StatusHud.setBiscuitReroll）。
+func SetBiscuitReroll(opts BiscuitReroll) {
+	max := opts.Max
+	if max <= 0 {
+		max = 500
+	}
+	parts := []string{"洗脆饼"}
+	// Lua 以 opts.current 是否传入区分（0 为真值）；Go 以 HasCurrent 表达同义。
+	if opts.HasCurrent {
+		parts = append(parts, fmt.Sprintf("%d/%d", opts.Current, max))
+	} else {
+		parts = append(parts, fmt.Sprintf("目标 %d 次", max))
+	}
+	if opts.Extra != "" {
+		parts = append(parts, opts.Extra)
+	}
+	publish(Update{Phase: PhaseTask, Task: "洗脆饼", Text: strings.Join(parts, " · ")})
+}
+
+// CountdownSleep 带 HUD 刷新的分片休眠（对应 Lua StatusHud.countdownSleep）。
+// 每片前发布一次提示文本，分片间隙触发守卫扫描（清弹窗）。
+func CountdownSleep(totalSec int, tag string, makeDetail func(remain int) string, stepSec int) {
+	step := stepSec
+	if step <= 0 {
+		step = 5
+	}
+	left := max(0, totalSec)
+	for left > 0 {
+		chunk := min(left, step)
+		if makeDetail != nil {
+			SetTask(tag, makeDetail(left))
+		}
+		color.Sleep(chunk*1000, 500)
+		left -= chunk
+	}
 }
 
 // SetMineWait 各任务等待状态精简显示（对应 Lua StatusHud.setMineWait）。

@@ -301,3 +301,12 @@ func FindAll(def vision.FindDef) []image.Point {
 	}
 	return vision.FindMultiColorAll(frame, def)
 }
+
+// MatchRGB 单点比色是否匹配（对应 Lua cmpColor(x, y, color, sim)）。
+func MatchRGB(x, y int, spec string, sim float32) bool {
+	frame := capture()
+	if frame == nil {
+		return false
+	}
+	return vision.MatchRGB(frame, x, y, spec, sim)
+}

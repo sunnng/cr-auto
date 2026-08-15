@@ -49,6 +49,41 @@ func Mine() (config.MineConfig, error) {
 	return cfg, err
 }
 
+// Square 便捷读取布谷鸟广场配置段（对应 Lua UserConfig.get("square")）。
+func Square() (config.SquareConfig, error) {
+	var cfg config.SquareConfig
+	err := Default().Get("square", &cfg)
+	return cfg, err
+}
+
+// SeasideMarket 便捷读取海滩交易所配置段（对应 Lua UserConfig.get("seasideMarket")）。
+func SeasideMarket() (config.SeasideMarketConfig, error) {
+	var cfg config.SeasideMarketConfig
+	err := Default().Get("seasideMarket", &cfg)
+	return cfg, err
+}
+
+// Arena 便捷读取王国竞技场配置段（对应 Lua UserConfig.get("arena")）。
+func Arena() (config.ArenaConfig, error) {
+	var cfg config.ArenaConfig
+	err := Default().Get("arena", &cfg)
+	return cfg, err
+}
+
+// Starlight 便捷读取梦幻繁星岛配置段（对应 Lua UserConfig.get("starlight")）。
+func Starlight() (config.StarlightConfig, error) {
+	var cfg config.StarlightConfig
+	err := Default().Get("starlight", &cfg)
+	return cfg, err
+}
+
+// Biscuit 便捷读取洗脆饼配置段（对应 Lua UserConfig.get("biscuit")）。
+func Biscuit() (config.BiscuitConfig, error) {
+	var cfg config.BiscuitConfig
+	err := Default().Get("biscuit", &cfg)
+	return cfg, err
+}
+
 // Load 返回全部配置段（默认值 + 持久化覆盖合并后的副本）。
 func (u *UserConfig) Load() (map[string]map[string]any, error) {
 	u.mu.Lock()

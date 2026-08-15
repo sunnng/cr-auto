@@ -218,6 +218,39 @@ func Number(rect image.Rectangle) (int, bool) {
 	return n, true
 }
 
+// RecognizeText 多行文本识别（对应 Lua Ocr.recognizeText）。
+func RecognizeText(rect image.Rectangle) string {
+	r, ok := Scan(rect, MultiMode, ReturnTypeText)
+	if !ok {
+		return ""
+	}
+	return r.Text
+}
+
+// RecognizeNumber 数字文本识别（对应 Lua Ocr.recognizeNumber）。
+func RecognizeNumber(rect image.Rectangle) string {
+	r, ok := Scan(rect, MultiMode, ReturnTypeNum)
+	if !ok {
+		return ""
+	}
+	return r.Text
+}
+
+// RecognizeWords 识别词条列表（对应 Lua Ocr.recognizeWords）。
+func RecognizeWords(rect image.Rectangle) []string {
+	r, ok := Scan(rect, MultiMode, ReturnTypeJSON)
+	if !ok {
+		return nil
+	}
+	var words []string
+	for _, item := range r.Items {
+		if item.Words != "" {
+			words = append(words, item.Words)
+		}
+	}
+	return words
+}
+
 var fractionRe = regexp.MustCompile(`(\d+)\s*/\s*(\d+)`)
 
 // ParseFraction 从文本解析 x/x（左=当前，右=上限；对应 Lua Ocr.parseFraction）。

@@ -93,18 +93,19 @@ func TestHostEngineStartsWithRegisterInjection(t *testing.T) {
 	waitFor(t, func() bool {
 		host.mu.Lock()
 		defer host.mu.Unlock()
-		return host.rt != nil && host.rt.Scheduler.Count() == 4
+		return host.rt != nil && host.rt.Scheduler.Count() == 9
 	})
 	host.mu.Lock()
 	scheduler := host.rt.Scheduler
 	guard := host.rt.Guard
 	host.mu.Unlock()
-	// M2a：守卫 1 个（网络联机状态不稳定）+ 矿山任务 4 个。
-	if scheduler.Count() != 4 {
-		t.Fatalf("M2a register must inject 4 mine tasks, got %d", scheduler.Count())
+	// M2b：守卫 1 个（网络联机状态不稳定）+ 业务任务 9 个
+	// （矿山勘查/开采/战斗/解除洋菜冻 + 海滩交易所/王国竞技场/梦幻繁星岛/布谷鸟广场/洗脆饼词条）。
+	if scheduler.Count() != 9 {
+		t.Fatalf("M2b register must inject 9 tasks, got %d", scheduler.Count())
 	}
 	if guard.TrapCount() != 1 {
-		t.Fatalf("M2a register must inject 1 guard trap, got %d", guard.TrapCount())
+		t.Fatalf("M2b register must inject 1 guard trap, got %d", guard.TrapCount())
 	}
 	host.stop()
 	waitFor(t, func() bool { return !host.isRunning() })
