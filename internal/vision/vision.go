@@ -118,22 +118,11 @@ func pointNear(img *image.NRGBA, p Point) bool {
 		channelNear(img.Pix[offset+2], p.B, p.Tol)
 }
 
-// Match 单特征比色是否匹配：命中色点数达到相似度要求即视为匹配。
+// Match 单特征比色是否匹配：命中色点数达到相似度要求即视为匹配
+// （逐点结果见 MatchPoints）。
 func Match(img *image.NRGBA, f Feature) bool {
-	if img == nil {
-		return false
-	}
-	points, err := parsePoints(f.Points)
-	if err != nil {
-		return false
-	}
-	matched := 0
-	for _, p := range points {
-		if pointNear(img, p) {
-			matched++
-		}
-	}
-	return matched >= requiredPoints(f.Sim, len(points))
+	_, ok := MatchPoints(img, f)
+	return ok
 }
 
 // MatchRGB 单点比色是否匹配（对应 Lua cmpColor(x, y, color, sim)）。
@@ -167,6 +156,34 @@ func MatchAny(img *image.NRGBA, features []Feature) (bool, int) {
 		}
 	}
 	return false, -1
+}
+
+// PointResult 单点比色结果（识别诊断锚点展示用）。
+type PointResult struct {
+	Point   Point
+	Matched bool
+}
+
+// MatchPoints 逐点比色：返回每个色点的命中结果，与整体是否满足相似度要求
+// （识别诊断页锚点叠加与场景置信度计算用）。特征串非法或帧为空时返回 (nil, false)。
+func MatchPoints(img *image.NRGBA, f Feature) ([]PointResult, bool) {
+	if img == nil {
+		return nil, false
+	}
+	points, err := parsePoints(f.Points)
+	if err != nil {
+		return nil, false
+	}
+	matched := 0
+	results := make([]PointResult, 0, len(points))
+	for _, p := range points {
+		hit := pointNear(img, p)
+		if hit {
+			matched++
+		}
+		results = append(results, PointResult{Point: p, Matched: hit})
+	}
+	return results, matched >= requiredPoints(f.Sim, len(points))
 }
 
 // ColorSpec 单个颜色规格："rrggbb[-偏色]"。

@@ -911,7 +911,7 @@ func renderDetectionPreview(frame *panelFrame) []Command {
 		if preview.Image == nil {
 			disabledText("尚未采集截图")
 		} else {
-			colorText(pillStatusColor(string(preview.Detection.Scene)), "场景："+sceneDisplayName(string(preview.Detection.Scene)))
+			colorText(pillStatusColor(string(preview.Detection.Scene)), "场景："+SceneDisplayName(string(preview.Detection.Scene)))
 			colorText(colorCream, fmt.Sprintf("置信度：%.1f%%", preview.Detection.Confidence*100))
 			threshold := frame.Draft.Safety.MinConfidence
 			if preview.Detection.Scene == SceneUnknown || preview.Detection.Confidence < threshold {
@@ -939,7 +939,7 @@ func renderDetectionPreview(frame *panelFrame) []Command {
 						constraint += " · 硬约束拒绝"
 					}
 				}
-				colorText(TextColor, fmt.Sprintf("%d. %s  %.1f%%  (%d/%d)%s", i+1, sceneDisplayName(string(candidate.Scene)), candidate.Score*100, candidate.MatchedAnchors, candidate.TotalAnchors, constraint))
+				colorText(TextColor, fmt.Sprintf("%d. %s  %.1f%%  (%d/%d)%s", i+1, SceneDisplayName(string(candidate.Scene)), candidate.Score*100, candidate.MatchedAnchors, candidate.TotalAnchors, constraint))
 			}
 
 			matchedAnchors := 0
@@ -1044,29 +1044,6 @@ func drawDetectionOverlay(drawList *imgui.DrawList, origin, size imgui.Vec2, det
 			imgui.DrawFlagsRoundCornersAll,
 			1.5,
 		)
-	}
-}
-
-func sceneDisplayName(scene string) string {
-	switch SceneID(scene) {
-	case SceneKingdomHome:
-		return "王国主页"
-	case SceneProductionAssistant:
-		return "生产助手"
-	case SceneProductionOverviewBase:
-		return "生产总览"
-	case SceneProductionOverviewSparse:
-		return "生产总览 · 未填满"
-	case SceneProductionOverviewFilled:
-		return "生产总览 · 已填满"
-	case SceneProductionFillDialog:
-		return "一次填满确认"
-	case SceneLandmarkReward:
-		return "地标奖励"
-	case SceneUnknown, "":
-		return "未知场景"
-	default:
-		return limitPillText(scene, 16)
 	}
 }
 

@@ -280,6 +280,21 @@ func (p *Panel) PublishPhase(phase, outcome, message string) error {
 	return nil
 }
 
+// Status returns the latest published runtime status (host diagnostics/tests).
+func (p *Panel) Status() RuntimeStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.status
+}
+
+// DetectionPreview returns the latest published detection preview (host
+// diagnostics/tests; the renderer consumes it through the frame instead).
+func (p *Panel) DetectionPreview() DetectionPreview {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return cloneDetectionPreview(p.preview)
+}
+
 func (p *Panel) SetCompact(compact bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

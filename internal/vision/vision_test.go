@@ -311,6 +311,45 @@ func TestFindMultiColorRespectsRegion(t *testing.T) {
 	}
 }
 
+func TestMatchPointsReportsPerPointResults(t *testing.T) {
+	f := Feature{Points: "1|1|ff0000-000000,2|2|00ff00-000000"}
+	img := newFrame(4, 4, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
+		1001: {R: 0xff},
+	})
+	results, ok := MatchPoints(img, f)
+	if ok {
+		t.Fatal("partial match must not satisfy default sim (all points required)")
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 point results, got %d", len(results))
+	}
+	if !results[0].Matched || results[1].Matched {
+		t.Fatalf("expected first point matched and second unmatched, got %+v %+v", results[0], results[1])
+	}
+	if results[0].Point.X != 1 || results[0].Point.Y != 1 || results[0].Point.R != 0xff {
+		t.Fatalf("point metadata must round-trip, got %+v", results[0].Point)
+	}
+}
+
+func TestMatchPointsSatisfiesSim(t *testing.T) {
+	f := Feature{Points: "1|1|ff0000-000000,2|2|00ff00-000000", Sim: 0.5}
+	img := newFrame(4, 4, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
+		1001: {R: 0xff},
+	})
+	if _, ok := MatchPoints(img, f); !ok {
+		t.Fatal("one of two points must satisfy sim=0.5")
+	}
+}
+
+func TestMatchPointsNilFrameOrBadSpec(t *testing.T) {
+	if _, ok := MatchPoints(nil, Feature{Points: "1|1|ff0000-000000"}); ok {
+		t.Fatal("nil frame must not match")
+	}
+	if _, ok := MatchPoints(newFrame(4, 4, color.NRGBA{0, 0, 0, 255}, nil), Feature{Points: "bad"}); ok {
+		t.Fatal("bad spec must not match")
+	}
+}
+
 func TestFindMultiColorAllCollectsEveryAnchor(t *testing.T) {
 	img := newFrame(10, 10, color.NRGBA{0, 0, 0, 255}, map[int]color.NRGBA{
 		2002: {R: 0xff}, 5005: {R: 0xff},

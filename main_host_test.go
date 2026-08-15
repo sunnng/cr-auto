@@ -1,9 +1,19 @@
 package main
 
 import (
+	"image"
+	"image/color"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"app/internal/game"
+	"app/internal/game/kingdom"
+	"app/internal/lib/store"
+	"app/internal/lib/userconfig"
 	"app/internal/ui"
 )
 
@@ -25,6 +35,296 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	if !cond() {
 		t.Fatal("condition not reached in time")
+	}
+}
+
+// setupHostTest 注入临时会话存储，保证 CommandSave 走 userconfig 落盘路径。
+func setupHostTest(t *testing.T) {
+	t.Helper()
+	store.SetDefault(store.New(filepath.Join(t.TempDir(), "store.json")))
+	t.Cleanup(func() { store.SetDefault(nil) })
+}
+
+// staticFrameSource 固定帧来源（识别诊断测试用）。
+type staticFrameSource struct {
+	frame *image.NRGBA
+}
+
+func (s *staticFrameSource) Capture() (*image.NRGBA, error) { return s.frame, nil }
+
+// paintPointSpecs 把特征串的色点原样画到帧上（识别诊断测试用）。
+func paintPointSpecs(img *image.NRGBA, spec string) {
+	for _, chunk := range strings.Split(spec, ",") {
+		parts := strings.Split(chunk, "|")
+		if len(parts) < 3 {
+			continue
+		}
+		x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			continue
+		}
+		y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			continue
+		}
+		hex := strings.TrimSpace(parts[2])
+		if dash := strings.LastIndex(hex, "-"); dash >= 0 {
+			hex = hex[:dash]
+		}
+		rgb, err := strconv.ParseUint(hex, 16, 32)
+		if err != nil {
+			continue
+		}
+		img.SetNRGBA(x, y, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 0xff})
+	}
+}
+
+func kingdomHomeFrame() *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
+	paintPointSpecs(img, kingdom.Home().Feature.Points)
+	return img
+}
+
+func TestHostSaveAppliesTaskSwitches(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := ui.Default()
+	draft.Tasks = map[string]ui.TaskSetting{
+		"mine_survey":    {Enabled: false},
+		"mine_mining":    {Enabled: true},
+		"seaside_market": {Enabled: true},
+	}
+	host.Handle(ui.Command{Type: ui.CommandSave, Settings: &draft})
+
+	status := panel.Status()
+	if status.Outcome != "config_saved" {
+		t.Fatalf("outcome=%q want config_saved", status.Outcome)
+	}
+
+	fresh := userconfig.Default()
+	var mineCfg struct {
+		SurveyEnabled bool
+		MiningEnabled bool
+	}
+	if err := fresh.Get("mine", &mineCfg); err != nil {
+		t.Fatal(err)
+	}
+	if mineCfg.SurveyEnabled || !mineCfg.MiningEnabled {
+		t.Fatalf("mine switches not applied: %+v", mineCfg)
+	}
+	var seaside struct{ Enabled bool }
+	if err := fresh.Get("seasideMarket", &seaside); err != nil {
+		t.Fatal(err)
+	}
+	if !seaside.Enabled {
+		t.Fatalf("seaside switch not applied: %+v", seaside)
+	}
+}
+
+func TestHostSaveRejectsNilSettings(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	host.Handle(ui.Command{Type: ui.CommandSave})
+	if status := panel.Status(); status.Outcome != "config_error" {
+		t.Fatalf("nil settings must publish config_error, got %q", status.Outcome)
+	}
+}
+
+func TestHostSaveRejectsInvalidDraftWithoutWriting(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := ui.Default()
+	draft.Safety.MinConfidence = 0.5 // 低于 0.90 下限
+	host.Handle(ui.Command{Type: ui.CommandSave, Settings: &draft})
+
+	if status := panel.Status(); status.Outcome != "config_error" {
+		t.Fatalf("invalid draft must publish config_error, got %q", status.Outcome)
+	}
+	// 校验失败不得落盘：mine 段仍为默认（勘查开）。
+	fresh := userconfig.Default()
+	var mineCfg struct{ SurveyEnabled bool }
+	if err := fresh.Get("mine", &mineCfg); err != nil {
+		t.Fatal(err)
+	}
+	if !mineCfg.SurveyEnabled {
+		t.Fatal("invalid draft must not touch the store")
+	}
+}
+
+func TestHostStartWithSettingsSavesThenRuns(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := ui.Default()
+	draft.Tasks = map[string]ui.TaskSetting{"mine_survey": {Enabled: false}}
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	fresh := userconfig.Default()
+	var mineCfg struct{ SurveyEnabled bool }
+	if err := fresh.Get("mine", &mineCfg); err != nil {
+		t.Fatal(err)
+	}
+	if mineCfg.SurveyEnabled {
+		t.Fatal("start with settings must persist task switches before running")
+	}
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostDiagnosticSavesFrame(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+	dir := filepath.Join(t.TempDir(), "diag")
+	host.SetDiagnosticDir(dir)
+	host.SetFrameSource(&staticFrameSource{frame: image.NewNRGBA(image.Rect(0, 0, 16, 16))})
+
+	host.Handle(ui.Command{Type: ui.CommandDiagnostic})
+
+	status := panel.Status()
+	if status.Outcome != "diagnostic_saved" {
+		t.Fatalf("outcome=%q want diagnostic_saved", status.Outcome)
+	}
+	if !strings.Contains(status.Message, dir) {
+		t.Fatalf("message must contain the saved path: %q", status.Message)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), ".png") {
+		t.Fatalf("expected one png in %s, got %v err=%v", dir, entries, err)
+	}
+}
+
+func TestHostDiagnosticWithoutFrameSource(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	host.Handle(ui.Command{Type: ui.CommandDiagnostic})
+
+	if status := panel.Status(); status.Outcome != "diagnostic_error" {
+		t.Fatalf("outcome=%q want diagnostic_error", status.Outcome)
+	}
+}
+
+func TestHostInspectPublishesDetectionPreview(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+
+	host.Handle(ui.Command{Type: ui.CommandInspect})
+
+	preview := panel.DetectionPreview()
+	if preview.Error != "" {
+		t.Fatalf("inspect must not publish an error: %s", preview.Error)
+	}
+	if preview.Detection.Scene != ui.SceneKingdomHome {
+		t.Fatalf("scene=%q want %q", preview.Detection.Scene, ui.SceneKingdomHome)
+	}
+	if preview.Detection.Confidence != 1 {
+		t.Fatalf("confidence=%v want 1", preview.Detection.Confidence)
+	}
+	if len(preview.Detection.Candidates) == 0 || len(preview.Detection.Anchors) == 0 {
+		t.Fatalf("preview must include candidates and anchors: %+v", preview.Detection)
+	}
+}
+
+func TestHostInspectWithoutFrameSource(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	host.Handle(ui.Command{Type: ui.CommandInspect})
+
+	if preview := panel.DetectionPreview(); preview.Error == "" {
+		t.Fatal("inspect without frame source must publish an error")
+	}
+}
+
+func TestTaskDescriptorsCatalog(t *testing.T) {
+	setupHostTest(t)
+
+	descriptors := taskDescriptors()
+	if len(descriptors) != 9 {
+		t.Fatalf("catalog must publish 9 tasks, got %d", len(descriptors))
+	}
+	seen := map[string]bool{}
+	for _, d := range descriptors {
+		if d.ID == "" || d.Name == "" || d.Description == "" {
+			t.Fatalf("incomplete descriptor: %+v", d)
+		}
+		if seen[d.ID] {
+			t.Fatalf("duplicate descriptor ID %q", d.ID)
+		}
+		seen[d.ID] = true
+		if !d.Available {
+			t.Fatalf("M2b task %q must be available", d.ID)
+		}
+		if d.MaxRuns < 1 {
+			t.Fatalf("descriptor %q MaxRuns=%d", d.ID, d.MaxRuns)
+		}
+	}
+	// 名称顺序与 RegisterAll 一致。
+	for i, meta := range game.Catalog() {
+		if descriptors[i].Name != meta.Name {
+			t.Fatalf("descriptor[%d].Name=%q want %q", i, descriptors[i].Name, meta.Name)
+		}
+	}
+}
+
+// TestGameSceneKeysHaveDisplayNames 识别诊断页的场景键（game）必须都有中文显示名
+// （ui），防止 detect.go / ui/detection.go 两侧键值漂移（add scene 时三处同步）。
+func TestGameSceneKeysHaveDisplayNames(t *testing.T) {
+	setupHostTest(t)
+
+	for _, key := range game.SceneKeys() {
+		name := ui.SceneDisplayName(key)
+		if name == key || name == "未知场景" {
+			t.Fatalf("scene key %q has no display name, got %q", key, name)
+		}
+	}
+	// 未注册的键回退为原键显示。
+	if got := ui.SceneDisplayName("not-a-real-scene"); got != "not-a-real-scene" {
+		t.Fatalf("unknown scene must fall back to the raw key, got %q", got)
+	}
+}
+
+func TestInitialSettingsSeedsTaskSwitchesFromUserConfig(t *testing.T) {
+	setupHostTest(t)
+
+	if err := game.ApplyTaskSwitches(userconfig.Default(), map[string]bool{
+		"mine_survey":    false,
+		"seaside_market": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	draft := initialSettings()
+	if draft.Tasks["mine_survey"].Enabled {
+		t.Fatal("mine_survey must seed disabled from userconfig")
+	}
+	if !draft.Tasks["seaside_market"].Enabled {
+		t.Fatal("seaside_market must seed enabled from userconfig")
+	}
+	// 未保存过的任务回读默认值（config.Static.User：square.Enabled=true）。
+	if !draft.Tasks["square"].Enabled {
+		t.Fatal("square must seed default enabled")
+	}
+	if len(draft.Tasks) != len(game.Catalog()) {
+		t.Fatalf("draft must cover all %d catalog tasks, got %d", len(game.Catalog()), len(draft.Tasks))
+	}
+	for _, setting := range draft.Tasks {
+		if setting.MaxRuns < 1 {
+			t.Fatalf("seeded task must carry MaxRuns, got %+v", setting)
+		}
 	}
 }
 
@@ -109,10 +409,4 @@ func TestHostEngineStartsWithRegisterInjection(t *testing.T) {
 	}
 	host.stop()
 	waitFor(t, func() bool { return !host.isRunning() })
-}
-
-func (h *Host) isRunning() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.running
 }

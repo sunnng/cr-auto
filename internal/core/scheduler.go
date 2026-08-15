@@ -83,6 +83,11 @@ func (s *Scheduler) Names() []string {
 	return names
 }
 
+// Tasks 按注册顺序返回全部任务（测试/诊断用）。
+func (s *Scheduler) Tasks() []Task {
+	return append([]Task(nil), s.tasks...)
+}
+
 // Run 执行一轮：按注册顺序串行执行条件满足的任务。
 // stopOnError 时遇 panic 返回 ok=false；返回本轮是否有任务执行。
 func (s *Scheduler) Run(stopOnError bool) (hasWork bool, ok bool) {

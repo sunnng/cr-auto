@@ -30,6 +30,8 @@ func main() {
 
 	commands := make(chan ui.Command, 32)
 	panel := ui.NewPanel()
+	// 会话存储路径（面板打开前注入：initialSettings 需要回读已保存的任务开关）。
+	store.SetDefault(store.New(storePath()))
 	initialStatus := ui.RuntimeStatus{
 		Phase:     "idle",
 		Scene:     "unknown",
@@ -38,7 +40,8 @@ func main() {
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
 	if err := panel.Open(ui.Snapshot{
-		Settings: ui.Default(),
+		Settings: initialSettings(),
+		Catalog:  taskDescriptors(),
 		Status:   initialStatus,
 	}, func(command ui.Command) {
 		select {
@@ -82,12 +85,14 @@ func main() {
 		Sleep:   func(ms int) { utils.Sleep(ms) },
 		Random:  func(min, max int) int { return utils.Random(min, max) },
 	})
-	// 帧来源 → 截图隐身 + CaptureScreen（ADR-0003 唯一截图出口）。
-	color.SetFrameSource(&deviceFrameSource{panel: panel})
-	// 会话存储路径。
-	store.SetDefault(store.New(storePath()))
+	// 帧来源 → 截图隐身 + CaptureScreen（ADR-0003 唯一截图出口）；
+	// 同一适配器注入引擎识别与识别诊断（诊断/立即识别命令共用）。
+	frameSource := &deviceFrameSource{panel: panel}
+	color.SetFrameSource(frameSource)
 
 	host := NewHost(panel)
+	host.SetFrameSource(frameSource)
+	host.SetDiagnosticDir(diagnosticDir())
 	stop := make(chan struct{})
 	unregister := registerLifecycle(ctx, stop, host)
 	defer unregister()
@@ -131,6 +136,14 @@ func storePath() string {
 		return path
 	}
 	return "data/store.json"
+}
+
+// diagnosticDir 诊断截图保存目录（AutoGo 工作目录下的 data/diagnostics）。
+func diagnosticDir() string {
+	if path := files.Path("data/diagnostics"); path != "" {
+		return path
+	}
+	return defaultDiagnosticDir
 }
 
 func registerLifecycle(ctx context.Context, stop chan<- struct{}, host *Host) func() {
