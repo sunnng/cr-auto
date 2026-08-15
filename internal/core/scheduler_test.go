@@ -99,6 +99,99 @@ func TestSchedulerRunsInRegistrationOrder(t *testing.T) {
 	}
 }
 
+func TestSchedulerPriorityOrdersExecution(t *testing.T) {
+	s := NewScheduler()
+	var order []string
+	s.Add("low", func() bool { return true }, func() error { order = append(order, "low"); return nil })
+	s.AddWithPolicy("high", TaskPolicy{Priority: 100}, func() bool { return true }, func() error { order = append(order, "high"); return nil })
+	s.Run(false)
+	if len(order) != 2 || order[0] != "high" || order[1] != "low" {
+		t.Fatalf("priority must reorder execution: %v", order)
+	}
+}
+
+func TestSchedulerPriorityStableKeepsRegistrationOrder(t *testing.T) {
+	s := NewScheduler()
+	var order []string
+	s.Add("a", func() bool { return true }, func() error { order = append(order, "a"); return nil })
+	s.AddWithPolicy("b", TaskPolicy{Priority: 0}, func() bool { return true }, func() error { order = append(order, "b"); return nil })
+	s.Add("c", func() bool { return true }, func() error { order = append(order, "c"); return nil })
+	s.Run(false)
+	if len(order) != 3 || order[0] != "a" || order[1] != "b" || order[2] != "c" {
+		t.Fatalf("equal priority must keep registration order: %v", order)
+	}
+}
+
+func TestSchedulerMaxRunsPerRound(t *testing.T) {
+	s := NewScheduler()
+	ran := 0
+	s.AddWithPolicy("chunk", TaskPolicy{MaxRuns: 3}, func() bool { return true }, func() error { ran++; return nil })
+	hasWork, ok := s.Run(false)
+	if !ok || !hasWork {
+		t.Fatalf("hasWork=%v ok=%v", hasWork, ok)
+	}
+	if ran != 3 {
+		t.Fatalf("task must run at most MaxRuns times per round, ran=%d", ran)
+	}
+	// 上限是每轮而非会话：第二轮重新计数。
+	s.Run(false)
+	if ran != 6 {
+		t.Fatalf("MaxRuns must reset each round, total after 2 rounds=%d", ran)
+	}
+}
+
+func TestSchedulerMaxRunsRechecksCondition(t *testing.T) {
+	s := NewScheduler()
+	ran := 0
+	ready := true
+	s.AddWithPolicy("gated", TaskPolicy{MaxRuns: 5}, func() bool { return ready }, func() error { ran++; ready = false; return nil })
+	s.Run(false)
+	if ran != 1 {
+		t.Fatalf("condition must be re-evaluated between runs, ran=%d", ran)
+	}
+}
+
+func TestSchedulerMaxRunsZeroRunsOncePerRound(t *testing.T) {
+	s := NewScheduler()
+	ran := 0
+	s.AddWithPolicy("free", TaskPolicy{MaxRuns: 0}, func() bool { return true }, func() error { ran++; return nil })
+	hasWork, ok := s.Run(false)
+	if !ok || !hasWork {
+		t.Fatalf("hasWork=%v ok=%v", hasWork, ok)
+	}
+	if ran != 1 {
+		t.Fatalf("task without MaxRuns must run once per round, ran=%d", ran)
+	}
+}
+
+func TestSchedulerSetPolicyUpdatesExistingTask(t *testing.T) {
+	s := NewScheduler()
+	var order []string
+	s.Add("first", func() bool { return true }, func() error { order = append(order, "first"); return nil })
+	s.Add("second", func() bool { return true }, func() error { order = append(order, "second"); return nil })
+	if !s.SetPolicy("second", TaskPolicy{Priority: 100}) {
+		t.Fatal("SetPolicy must report the task exists")
+	}
+	s.Run(false)
+	if len(order) != 2 || order[0] != "second" || order[1] != "first" {
+		t.Fatalf("SetPolicy must reorder execution: %v", order)
+	}
+	if s.SetPolicy("missing", TaskPolicy{}) {
+		t.Fatal("SetPolicy on unknown task must report false")
+	}
+}
+
+func TestSchedulerSetPolicyMaxRuns(t *testing.T) {
+	s := NewScheduler()
+	ran := 0
+	s.Add("chunk", func() bool { return true }, func() error { ran++; return nil })
+	s.SetPolicy("chunk", TaskPolicy{MaxRuns: 2})
+	s.Run(false)
+	if ran != 2 {
+		t.Fatalf("SetPolicy MaxRuns must be enforced, ran=%d", ran)
+	}
+}
+
 func TestSchedulerIdleProviders(t *testing.T) {
 	s := NewScheduler()
 	s.AddIdleProvider("mine", func() (int, string) { return 600, "勘查 600s" })

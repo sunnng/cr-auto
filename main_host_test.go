@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"app/internal/core"
 	"app/internal/game"
 	"app/internal/game/kingdom"
 	"app/internal/lib/store"
+	"app/internal/lib/touch"
 	"app/internal/lib/userconfig"
 	"app/internal/ui"
 )
@@ -92,9 +94,9 @@ func TestHostSaveAppliesTaskSwitches(t *testing.T) {
 
 	draft := ui.Default()
 	draft.Tasks = map[string]ui.TaskSetting{
-		"mine_survey":    {Enabled: false},
-		"mine_mining":    {Enabled: true},
-		"seaside_market": {Enabled: true},
+		"mine_survey":    {Enabled: false, MaxRuns: 1},
+		"mine_mining":    {Enabled: true, MaxRuns: 1},
+		"seaside_market": {Enabled: true, MaxRuns: 5},
 	}
 	host.Handle(ui.Command{Type: ui.CommandSave, Settings: &draft})
 
@@ -163,7 +165,7 @@ func TestHostStartWithSettingsSavesThenRuns(t *testing.T) {
 	host := NewHost(panel)
 
 	draft := ui.Default()
-	draft.Tasks = map[string]ui.TaskSetting{"mine_survey": {Enabled: false}}
+	draft.Tasks = map[string]ui.TaskSetting{"mine_survey": {Enabled: false, MaxRuns: 1}}
 	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
 	waitFor(t, func() bool { return host.isRunning() })
 
@@ -407,6 +409,237 @@ func TestHostEngineStartsWithRegisterInjection(t *testing.T) {
 	if guard.TrapCount() != 1 {
 		t.Fatalf("M2b register must inject 1 guard trap, got %d", guard.TrapCount())
 	}
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+// allTasksDisabled 关闭全部任务的草稿（让引擎每轮快速空转）。
+func allTasksDisabled() ui.Draft {
+	draft := ui.Default()
+	for _, meta := range game.Catalog() {
+		draft.Tasks[meta.ID] = ui.TaskSetting{Enabled: false, Priority: 0, MaxRuns: meta.MaxRuns}
+	}
+	return draft
+}
+
+func TestHostRunOnceStopsAfterOneRound(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := allTasksDisabled()
+	draft.Run.Mode = ui.RunOnce
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	// 单次运行可能在一轮内极快完成（<10ms），直接等终态：停止 + 原因消息。
+	waitFor(t, func() bool {
+		return !host.isRunning() && strings.Contains(panel.Status().Message, "单次运行")
+	})
+}
+
+func TestHostActionBudgetStopsEngine(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := allTasksDisabled()
+	draft.Safety.MaxActionsPerRun = 3
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	touch.TapR(10, 10, 0)
+	touch.TapR(20, 20, 0)
+	touch.TapR(30, 30, 0)
+
+	waitFor(t, func() bool { return !host.isRunning() })
+	if status := panel.Status(); !strings.Contains(status.Message, "动作预算") {
+		t.Fatalf("budget stop must explain the reason: %q", status.Message)
+	}
+}
+
+func TestHostActionCountPublishedToPanel(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := allTasksDisabled()
+	draft.Safety.MaxActionsPerRun = 100
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	touch.TapR(10, 10, 0)
+	waitFor(t, func() bool { return panel.Status().ActionCount == 1 })
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostUnknownSceneTimeoutStopsEngine(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+	host.SetFrameSource(&staticFrameSource{frame: image.NewNRGBA(image.Rect(0, 0, 1600, 900))})
+	host.observeInterval = 100 * time.Millisecond
+
+	fakeNow := time.Date(2026, 8, 15, 10, 0, 0, 0, time.Local)
+	host.nowFn = func() time.Time { return fakeNow }
+
+	draft := allTasksDisabled()
+	draft.Safety.UnknownTimeoutSec = 5
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	// 等首个观测 tick 记下 unknownSince，再推进时钟触发超时。
+	time.Sleep(250 * time.Millisecond)
+	fakeNow = fakeNow.Add(6 * time.Second)
+	waitFor(t, func() bool { return !host.isRunning() })
+	if status := panel.Status(); !strings.Contains(status.Message, "未知场景超时") {
+		t.Fatalf("unknown-scene stop must explain the reason: %q", status.Message)
+	}
+}
+
+func TestHostSceneObservedIntoStatus(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+	host.observeInterval = 100 * time.Millisecond
+
+	draft := allTasksDisabled()
+	draft.Safety.UnknownTimeoutSec = 60
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	waitFor(t, func() bool { return panel.Status().Scene == string(ui.SceneKingdomHome) })
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostScheduledWaitsOutsideWindowThenStarts(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	fakeNow := time.Date(2026, 8, 15, 10, 0, 0, 0, time.Local)
+	host.nowFn = func() time.Time { return fakeNow }
+
+	draft := allTasksDisabled()
+	draft.Run.Mode = ui.RunScheduled
+	draft.Run.StartMinute = 10*60 + 10 // 10:10
+	draft.Run.EndMinute = 10*60 + 20   // 10:20
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+
+	// 窗口未到：等待计划时段，引擎未启动。
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.running && host.rt == nil
+	})
+	waitFor(t, func() bool { return strings.Contains(panel.Status().Message, "计划时段") })
+
+	// 时钟进入窗口：引擎启动。
+	fakeNow = time.Date(2026, 8, 15, 10, 15, 0, 0, time.Local)
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil
+	})
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostScheduledStopsWhenWindowEnds(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+	// 帧来源存在时窗口结束由观测器检测（100ms 级），与设备端一致。
+	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+	host.observeInterval = 100 * time.Millisecond
+
+	fakeNow := time.Date(2026, 8, 15, 10, 5, 0, 0, time.Local)
+	host.nowFn = func() time.Time { return fakeNow }
+
+	draft := allTasksDisabled()
+	draft.Run.Mode = ui.RunScheduled
+	draft.Run.StartMinute = 10 * 60 // 10:00
+	draft.Run.EndMinute = 10*60 + 9 // 10:09
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil
+	})
+
+	fakeNow = time.Date(2026, 8, 15, 10, 10, 0, 0, time.Local)
+	waitFor(t, func() bool { return !host.isRunning() })
+	if status := panel.Status(); !strings.Contains(status.Message, "计划时段") {
+		t.Fatalf("window-end stop must explain the reason: %q", status.Message)
+	}
+}
+
+func TestHostScheduledFullDayWindowRunsLikeManual(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := allTasksDisabled()
+	draft.Run.Mode = ui.RunScheduled
+	draft.Run.StartMinute = 0
+	draft.Run.EndMinute = 1439
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return host.isRunning() })
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil
+	})
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostStartAppliesSessionTaskPolicies(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	draft := allTasksDisabled()
+	draft.Tasks["square"] = ui.TaskSetting{Enabled: false, Priority: 100, MaxRuns: 1}
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil && host.rt.Scheduler.Count() == 9
+	})
+	host.mu.Lock()
+	tasks := host.rt.Scheduler.Tasks()
+	host.mu.Unlock()
+	var square *core.Task
+	for i := range tasks {
+		if tasks[i].Name == "布谷鸟广场" {
+			square = &tasks[i]
+		}
+	}
+	if square == nil {
+		t.Fatal("square task not registered")
+	}
+	if square.Priority != 100 || square.MaxRuns != 1 {
+		t.Fatalf("session policy not applied: %+v", square)
+	}
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestHostPillStartWithoutSettingsRunsManual(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	// 悬浮胶囊启动：无草稿 → 手动模式、无预算/超时限制。
+	host.Handle(ui.Command{Type: ui.CommandStart})
+	waitFor(t, func() bool { return host.isRunning() })
+	waitFor(t, func() bool {
+		host.mu.Lock()
+		defer host.mu.Unlock()
+		return host.rt != nil
+	})
 	host.stop()
 	waitFor(t, func() bool { return !host.isRunning() })
 }

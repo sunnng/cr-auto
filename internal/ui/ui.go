@@ -280,6 +280,22 @@ func (p *Panel) PublishPhase(phase, outcome, message string) error {
 	return nil
 }
 
+// PublishObservation 更新运行中的场景与动作计数（识别观测/动作预算 HUD），
+// 不追加日志、不改变 phase/outcome/message（避免每帧刷屏）。
+func (p *Panel) PublishObservation(scene string, actionCount int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened {
+		return nil
+	}
+	if scene != "" {
+		p.status.Scene = scene
+	}
+	p.status.ActionCount = actionCount
+	p.status.UpdatedAt = time.Now().Format(time.RFC3339)
+	return nil
+}
+
 // Status returns the latest published runtime status (host diagnostics/tests).
 func (p *Panel) Status() RuntimeStatus {
 	p.mu.Lock()

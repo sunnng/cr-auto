@@ -127,6 +127,14 @@ func (d Draft) Validate() error {
 	if d.Safety.UnknownTimeoutSec < 5 || d.Safety.UnknownTimeoutSec > 300 {
 		return fmt.Errorf("未知场景超时必须在 5..300 秒之间，当前 %d", d.Safety.UnknownTimeoutSec)
 	}
+	for id, task := range d.Tasks {
+		if task.Priority < 0 || task.Priority > 100 {
+			return fmt.Errorf("任务 %q 优先级必须在 0..100 之间，当前 %d", id, task.Priority)
+		}
+		if task.MaxRuns < 1 || task.MaxRuns > 100 {
+			return fmt.Errorf("任务 %q 单次上限必须在 1..100 之间，当前 %d", id, task.MaxRuns)
+		}
+	}
 	return nil
 }
 

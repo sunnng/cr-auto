@@ -8,6 +8,10 @@ import (
 // TaskMeta 任务目录元数据：控制面板目录展示与 CommandSave 配置接线的唯一数据源。
 // ID 是面板草稿 Tasks 的稳定键；Section/Field 指向 userconfig 中该任务的开关字段
 // （register 各任务 CheckEnabled 消费同一份配置）。
+// MaxRuns 是该任务“单次上限”的默认值与滑动条上限（面板“单次上限”语义）：
+// 调度器每轮最多执行该次数，且连续执行之间重新求值条件（见 core.Scheduler）。
+// 矿山/繁星岛为 1（单次流程，安全策略固定）；分片型任务按模块自然配额设置
+// （广场 24 片≈每日上限、交易所 5 次≈补货缓冲、竞技场/洗脆饼 100 次）。
 type TaskMeta struct {
 	ID          string
 	Name        string
@@ -58,7 +62,7 @@ var taskCatalog = []TaskMeta{
 		Description: "按白名单商品补货、免费刷新并等待补货间隔",
 		Section:     "seasideMarket",
 		Field:       "Enabled",
-		MaxRuns:     1,
+		MaxRuns:     5,
 	},
 	{
 		ID:          "arena",
@@ -66,7 +70,7 @@ var taskCatalog = []TaskMeta{
 		Description: "按次数与免费刷新预算执行竞技场对战",
 		Section:     "arena",
 		Field:       "Enabled",
-		MaxRuns:     1,
+		MaxRuns:     100,
 	},
 	{
 		ID:          "starlight",
@@ -82,7 +86,7 @@ var taskCatalog = []TaskMeta{
 		Description: "在广场累计有效停留，达到每日上限后领取奖励并返回王国",
 		Section:     "square",
 		Field:       "Enabled",
-		MaxRuns:     1,
+		MaxRuns:     24,
 	},
 	{
 		ID:          "biscuit",
@@ -90,7 +94,7 @@ var taskCatalog = []TaskMeta{
 		Description: "按目标词条与总和规则执行洗脆饼重洗",
 		Section:     "biscuit",
 		Field:       "Enabled",
-		MaxRuns:     1,
+		MaxRuns:     100,
 	},
 }
 

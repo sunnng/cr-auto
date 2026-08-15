@@ -17,9 +17,10 @@ const runtimeTag = "[Runtime]"
 
 // RuntimeOptions 主循环构造参数。
 type RuntimeOptions struct {
-	Scheduler   *Scheduler // nil 时自建
-	Guard       *Guard     // nil 时自建
-	Register    func()     // 业务注入点（game.Register.All）
+	Scheduler   *Scheduler                    // nil 时自建
+	Guard       *Guard                        // nil 时自建
+	Register    func()                        // 业务注入点（game.Register.All）
+	RoundHook   func(round int, hasWork bool) // 每轮调度结束后回调（运行模式/安全策略用）
 	StopOnError bool
 }
 
@@ -29,6 +30,7 @@ type Runtime struct {
 	Scheduler   *Scheduler
 	Guard       *Guard
 	Register    func()
+	RoundHook   func(round int, hasWork bool)
 	StopOnError bool
 
 	GuardIntervalMS int
@@ -47,6 +49,7 @@ func NewRuntime(opts RuntimeOptions) *Runtime {
 		Scheduler:       opts.Scheduler,
 		Guard:           opts.Guard,
 		Register:        opts.Register,
+		RoundHook:       opts.RoundHook,
 		StopOnError:     opts.StopOnError,
 		GuardIntervalMS: config.Static.Runtime.GuardIntervalMS,
 		IdleDelayMS:     config.Static.Runtime.IdleDelayMS,
@@ -121,6 +124,12 @@ func (rt *Runtime) Run(ctx context.Context) error {
 		if !ok {
 			logger.Warn(runtimeTag, "[轮次] #%d 调度异常终止", round)
 			return errors.New("调度异常终止")
+		}
+		if rt.RoundHook != nil {
+			rt.RoundHook(round, hasWork)
+			if ctx.Err() != nil {
+				return nil
+			}
 		}
 
 		if !hasWork {

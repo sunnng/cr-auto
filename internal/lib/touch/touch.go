@@ -19,10 +19,31 @@ type Perform struct {
 	Random    func(min, max int) int
 }
 
-var perform Perform
+var (
+	perform     Perform
+	actionCount int
+	actionHook  func(count int)
+)
 
 // SetPerform 注入触控执行体；未注入时所有触控为 no-op（桩）。
 func SetPerform(p Perform) { perform = p }
+
+// SetActionHook 注册动作计数回调：每次点击/返回/滑动后以累计次数调用
+// （引擎“单次动作预算”接线；引擎单线程串行触控，无需并发保护）。
+func SetActionHook(fn func(count int)) { actionHook = fn }
+
+// ResetActionCount 清零动作计数（引擎单次运行开始时调用）。
+func ResetActionCount() { actionCount = 0 }
+
+// ActionCount 当前累计动作数（诊断/测试用）。
+func ActionCount() int { return actionCount }
+
+func countAction() {
+	actionCount++
+	if actionHook != nil {
+		actionHook(actionCount)
+	}
+}
 
 const defaultFingerID = 1
 
@@ -41,6 +62,7 @@ func sleep(ms int) {
 
 // TapR 点击坐标（抖动后 tap），delayMs 后休眠；未给 delay 时随机 300-600ms。
 func TapR(x, y int, delayMs int) {
+	countAction()
 	if perform.Tap != nil {
 		perform.Tap(jitter(x), jitter(y))
 	}
@@ -76,6 +98,7 @@ func TapAreaSafe(rect image.Rectangle, delayMs int) bool {
 
 // PressBack 按返回键。
 func PressBack(delayMs int) {
+	countAction()
 	if perform.Back != nil {
 		perform.Back()
 	}
@@ -105,6 +128,7 @@ func SwipeEx(opts SwipeOpts) bool {
 	if opts.X1 == 0 && opts.Y1 == 0 && opts.X2 == 0 && opts.Y2 == 0 {
 		return false
 	}
+	countAction()
 	id := opts.ID
 	if id == 0 {
 		id = defaultFingerID

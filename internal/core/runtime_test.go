@@ -71,6 +71,59 @@ func waitDone(t *testing.T, rt *Runtime) {
 	}
 }
 
+func TestRuntimeRoundHookReceivesRoundAndHasWork(t *testing.T) {
+	sched := NewScheduler()
+	var rounds []struct {
+		round   int
+		hasWork bool
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := newTestRuntime(sched, NewGuard())
+	rt.RoundHook = func(round int, hasWork bool) {
+		rounds = append(rounds, struct {
+			round   int
+			hasWork bool
+		}{round, hasWork})
+		if round >= 2 {
+			cancel()
+		}
+	}
+	rt.Register = func() {
+		sched.Add("t1", func() bool { return true }, func() error { return nil })
+	}
+	if err := rt.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) < 2 {
+		t.Fatalf("round hook must fire per round, got %d rounds", len(rounds))
+	}
+	if rounds[0].round != 1 || !rounds[0].hasWork {
+		t.Fatalf("round 1 must report hasWork=true: %+v", rounds[0])
+	}
+}
+
+func TestRuntimeRoundHookCancelStopsPromptly(t *testing.T) {
+	sched := NewScheduler()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := newTestRuntime(sched, NewGuard())
+	cancelled := false
+	rt.RoundHook = func(round int, hasWork bool) {
+		if round == 1 {
+			cancelled = true
+			cancel()
+		}
+	}
+	started := time.Now()
+	if err := rt.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !cancelled || time.Since(started) > 2*time.Second {
+		t.Fatalf("hook cancel must stop the loop promptly: cancelled=%v elapsed=%v", cancelled, time.Since(started))
+	}
+}
+
 func TestRuntimeRunsRegisteredTaskEachRound(t *testing.T) {
 	sched := NewScheduler()
 	var runs int

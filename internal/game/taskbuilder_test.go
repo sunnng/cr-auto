@@ -164,6 +164,38 @@ func TestTaskBuilderNoLeaveSquareHookRunsDirectly(t *testing.T) {
 	}
 }
 
+func TestTaskBuilderCatalogMaxRunsAsDefaultPolicy(t *testing.T) {
+	s := core.NewScheduler()
+	uc := newTestUserConfig(t)
+	ran := 0
+	NewTask(s, uc, "布谷鸟广场", TaskOptions{
+		CheckEnabled: func() bool { return true },
+		Action:       func() error { ran++; return nil },
+	})
+	// 目录默认策略（MaxRuns=24）应自动生效：一轮内可多次执行。
+	hasWork, ok := s.Run(false)
+	if !ok || !hasWork {
+		t.Fatalf("hasWork=%v ok=%v", hasWork, ok)
+	}
+	if ran != 24 {
+		t.Fatalf("catalog MaxRuns must cap per-round runs, ran=%d want 24", ran)
+	}
+}
+
+func TestTaskBuilderUnknownNameRunsOncePerRound(t *testing.T) {
+	s := core.NewScheduler()
+	uc := newTestUserConfig(t)
+	ran := 0
+	NewTask(s, uc, "未入目录的任务", TaskOptions{
+		CheckEnabled: func() bool { return true },
+		Action:       func() error { ran++; return nil },
+	})
+	s.Run(false)
+	if ran != 1 {
+		t.Fatalf("unknown task must keep one run per round, ran=%d", ran)
+	}
+}
+
 func TestTaskBuilderActionPanicReported(t *testing.T) {
 	s := core.NewScheduler()
 	uc := newTestUserConfig(t)

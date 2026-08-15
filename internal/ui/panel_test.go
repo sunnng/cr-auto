@@ -23,6 +23,56 @@ func TestConfigTabsExposeTheFourImplementedPages(t *testing.T) {
 	}
 }
 
+func TestDraftValidateRejectsBadTaskPolicies(t *testing.T) {
+	draft := Default()
+	draft.Tasks["mine_survey"] = TaskSetting{Enabled: true, Priority: 101, MaxRuns: 1}
+	if err := draft.Validate(); err == nil {
+		t.Fatal("priority beyond 100 must be rejected")
+	}
+	draft = Default()
+	draft.Tasks["mine_survey"] = TaskSetting{Enabled: true, Priority: 50, MaxRuns: 0}
+	if err := draft.Validate(); err == nil {
+		t.Fatal("MaxRuns below 1 must be rejected")
+	}
+	draft = Default()
+	draft.Tasks["mine_survey"] = TaskSetting{Enabled: true, Priority: 50, MaxRuns: 101}
+	if err := draft.Validate(); err == nil {
+		t.Fatal("MaxRuns beyond 100 must be rejected")
+	}
+	draft = Default()
+	draft.Tasks["mine_survey"] = TaskSetting{Enabled: true, Priority: 50, MaxRuns: 5}
+	if err := draft.Validate(); err != nil {
+		t.Fatalf("valid task policy must pass: %v", err)
+	}
+}
+
+func TestPanelPublishObservationUpdatesSceneAndCountWithoutLogSpam(t *testing.T) {
+	panel := NewPanel()
+	if err := panel.Open(Snapshot{Settings: Default()}, func(Command) {}); err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+
+	panel.Publish(RuntimeStatus{Phase: "running", Outcome: "running", Message: "引擎已启动"})
+	if err := panel.PublishObservation("mine_home", 12); err != nil {
+		t.Fatal(err)
+	}
+	status := panel.Status()
+	if status.Scene != "mine_home" || status.ActionCount != 12 {
+		t.Fatalf("observation not applied: %+v", status)
+	}
+	if status.Phase != "running" || status.Outcome != "running" {
+		t.Fatalf("observation must preserve phase/outcome: %+v", status)
+	}
+	if err := panel.PublishObservation("kingdom_home", 13); err != nil {
+		t.Fatal(err)
+	}
+	logs, _ := panel.readFrame()
+	if logs.Status.ActionCount != 13 {
+		t.Fatalf("second observation lost: %+v", logs.Status)
+	}
+}
+
 func TestPanelOwnsDraftAndEmitsIndependentSettingsCopy(t *testing.T) {
 	initial := Default()
 	initial.Tasks["daily"] = TaskSetting{Enabled: true, Priority: 50, MaxRuns: 1}

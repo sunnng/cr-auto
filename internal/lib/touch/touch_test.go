@@ -166,3 +166,44 @@ func TestSwipeXAndYHelpers(t *testing.T) {
 		t.Fatalf("helper endpoints wrong: %+v", rec.downs)
 	}
 }
+
+func TestActionCountIncrementsPerAction(t *testing.T) {
+	_, restore := fakePerform(t)
+	defer restore()
+	ResetActionCount()
+	TapR(10, 10, 100)
+	PressBack(0)
+	SwipeEx(SwipeOpts{X1: 0, Y1: 0, X2: 20, Y2: 20, MoveMs: 50})
+	if got := ActionCount(); got != 3 {
+		t.Fatalf("action count=%d want 3", got)
+	}
+}
+
+func TestActionHookReceivesRunningCount(t *testing.T) {
+	_, restore := fakePerform(t)
+	defer restore()
+	var counts []int
+	prevHook := actionHook
+	actionHook = func(count int) { counts = append(counts, count) }
+	defer func() { actionHook = prevHook }()
+	ResetActionCount()
+	TapR(10, 10, 100)
+	TapR(20, 20, 100)
+	if len(counts) != 2 || counts[0] != 1 || counts[1] != 2 {
+		t.Fatalf("hook counts=%v want [1 2]", counts)
+	}
+}
+
+func TestResetActionCount(t *testing.T) {
+	_, restore := fakePerform(t)
+	defer restore()
+	TapR(10, 10, 100)
+	ResetActionCount()
+	if ActionCount() != 0 {
+		t.Fatalf("count after reset=%d", ActionCount())
+	}
+	TapR(20, 20, 100)
+	if ActionCount() != 1 {
+		t.Fatalf("count after reset+1 tap=%d", ActionCount())
+	}
+}

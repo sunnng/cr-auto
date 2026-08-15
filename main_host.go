@@ -15,12 +15,79 @@ import (
 	"app/internal/game"
 	"app/internal/lib/color"
 	"app/internal/lib/logger"
+	"app/internal/lib/touch"
 	"app/internal/lib/userconfig"
 	"app/internal/ui"
 )
 
 // defaultDiagnosticDir 诊断截图默认保存目录（相对 AutoGo 脚本工作目录）。
 const defaultDiagnosticDir = "data/diagnostics"
+
+// runPolicy 单次运行的会话策略（面板草稿在 start 时快照，仅本次运行生效）。
+type runPolicy struct {
+	mode              ui.RunMode
+	startMinute       int
+	endMinute         int
+	maxActions        int     // 0 = 不限制
+	minConfidence     float32 // 低于该置信度的场景视为未知
+	unknownTimeoutSec int     // 0 = 不检查
+	tasks             map[string]ui.TaskSetting
+}
+
+// runPolicyFrom 从面板草稿快照会话策略；nil 草稿（悬浮胶囊启动）→ 手动模式、无限制。
+func runPolicyFrom(settings *ui.Draft) runPolicy {
+	policy := runPolicy{mode: ui.RunManual}
+	if settings == nil {
+		return policy
+	}
+	policy.mode = settings.Run.Mode
+	if policy.mode == "" {
+		policy.mode = ui.RunManual
+	}
+	policy.startMinute = settings.Run.StartMinute
+	policy.endMinute = settings.Run.EndMinute
+	policy.maxActions = settings.Safety.MaxActionsPerRun
+	policy.minConfidence = settings.Safety.MinConfidence
+	policy.unknownTimeoutSec = settings.Safety.UnknownTimeoutSec
+	policy.tasks = make(map[string]ui.TaskSetting, len(settings.Tasks))
+	for id, task := range settings.Tasks {
+		policy.tasks[id] = task
+	}
+	return policy
+}
+
+// modeLabel 运行模式的中文标签（启动/停止消息用）。
+func modeLabel(mode ui.RunMode) string {
+	switch mode {
+	case ui.RunOnce:
+		return "单次运行"
+	case ui.RunScheduled:
+		return "计划时段"
+	default:
+		return "手动运行"
+	}
+}
+
+// inRunWindow 当前本地时间是否处于 [start, end] 分钟窗口内（支持跨午夜）。
+func inRunWindow(now time.Time, startMinute, endMinute int) bool {
+	minute := now.Hour()*60 + now.Minute()
+	if startMinute <= endMinute {
+		return minute >= startMinute && minute <= endMinute
+	}
+	return minute >= startMinute || minute <= endMinute
+}
+
+// untilRunWindowStart 距下次窗口开始的时长；窗口内返回 0。
+func untilRunWindowStart(now time.Time, startMinute, endMinute int) time.Duration {
+	if inRunWindow(now, startMinute, endMinute) {
+		return 0
+	}
+	target := time.Date(now.Year(), now.Month(), now.Day(), startMinute/60, startMinute%60, 0, 0, now.Location())
+	if !target.After(now) {
+		target = target.Add(24 * time.Hour)
+	}
+	return target.Sub(now)
+}
 
 // Host 面板命令与平台生命周期的宿主接线：把 ui.Command 与 apkctl 事件
 // 翻译成对引擎（core.Runtime）的控制。设备适配（截图/触控/日志/状态）在
@@ -30,15 +97,26 @@ type Host struct {
 	frameSource color.FrameSource // 识别诊断的帧来源（截图隐身握手在适配器内完成）
 	diagDir     string            // 诊断截图保存目录
 
-	mu      sync.Mutex
-	rt      *core.Runtime
-	cancel  context.CancelFunc
-	running bool
-	frameID uint64
+	mu          sync.Mutex
+	rt          *core.Runtime
+	cancel      context.CancelFunc
+	running     bool
+	frameID     uint64
+	stopReason  string
+	actionCount int
+
+	// 测试/诊断注入点。
+	nowFn           func() time.Time
+	observeInterval time.Duration // 场景观测间隔（安全策略用）
 }
 
 func NewHost(panel *ui.Panel) *Host {
-	return &Host{panel: panel, diagDir: defaultDiagnosticDir}
+	return &Host{
+		panel:           panel,
+		diagDir:         defaultDiagnosticDir,
+		nowFn:           time.Now,
+		observeInterval: 3 * time.Second,
+	}
 }
 
 // SetFrameSource 注入识别诊断帧来源（设备端为“截图隐身 + CaptureScreen”适配器）。
@@ -253,35 +331,203 @@ func (h *Host) isRunning() bool {
 	return h.running
 }
 
-// start 启动引擎：先应用面板草稿（若有），再重建运行时并注入业务注册。
+// start 启动引擎：先应用面板草稿（若有），再按运行模式启动；
+// 计划时段未到窗口时先进入等待，窗口开始时自动启动引擎。
 func (h *Host) start(settings *ui.Draft) {
 	if settings != nil {
 		if !h.applySettings(*settings) {
 			return
 		}
 	}
+	policy := runPolicyFrom(settings)
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.running {
+		h.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rt := core.NewRuntime(core.RuntimeOptions{})
-	rt.Register = func() { game.RegisterAll(rt.Scheduler, rt.Guard) }
+	h.running = true
+	h.stopReason = ""
+	h.cancel = cancel
+	h.mu.Unlock()
 
+	if policy.mode == ui.RunScheduled && !inRunWindow(h.nowFn(), policy.startMinute, policy.endMinute) {
+		go h.waitForRunWindow(ctx, cancel, policy)
+		return
+	}
+	h.startEngine(ctx, cancel, policy)
+}
+
+// waitForRunWindow 计划时段等待：窗口开始前按 1 秒步进轮询；取消时结束运行。
+// 窗口到达后由 startEngine 接手运行状态（本 goroutine 不再调用 finishRun）。
+func (h *Host) waitForRunWindow(ctx context.Context, cancel context.CancelFunc, policy runPolicy) {
+	h.panel.PublishPhase("running", "scheduled_wait", "等待计划时段开始（"+modeLabel(policy.mode)+"）")
+	for {
+		if ctx.Err() != nil {
+			h.finishRun("计划等待已取消")
+			return
+		}
+		remain := untilRunWindowStart(h.nowFn(), policy.startMinute, policy.endMinute)
+		if remain <= 0 {
+			h.startEngine(ctx, cancel, policy)
+			return
+		}
+		step := remain
+		if step > time.Second {
+			step = time.Second
+		}
+		select {
+		case <-ctx.Done():
+			h.finishRun("计划等待已取消")
+			return
+		case <-time.After(step):
+		}
+	}
+}
+
+// startEngine 构建并启动引擎运行时：注册业务 + 会话任务策略，
+// 注入动作预算钩子与场景观测器（未知场景超时/计划时段结束）。
+func (h *Host) startEngine(ctx context.Context, cancel context.CancelFunc, policy runPolicy) {
+	// 动作预算：每次触控计数；达到上限即请求停止。引擎在动作/等待的
+	// 安全点（轮间、wait 分片）响应取消 —— 与暂停同为软性生效，动作本身
+	// 不会被硬打断，但预算内的每次触控都被计数。
+	if policy.maxActions > 0 {
+		touch.ResetActionCount()
+		touch.SetActionHook(func(count int) {
+			h.mu.Lock()
+			h.actionCount = count
+			h.mu.Unlock()
+			_ = h.panel.PublishObservation("", count)
+			if count >= policy.maxActions {
+				h.setStopReason(fmt.Sprintf("动作预算耗尽（%d/%d 次），已停止", count, policy.maxActions))
+				cancel()
+			}
+		})
+	}
+
+	rt := core.NewRuntime(core.RuntimeOptions{})
+	rt.Register = func() {
+		game.RegisterAll(rt.Scheduler, rt.Guard)
+		applySessionTaskPolicies(rt.Scheduler, policy.tasks)
+	}
+	rt.RoundHook = func(round int, hasWork bool) {
+		switch policy.mode {
+		case ui.RunOnce:
+			// 单次运行：完成一轮调度后退出。
+			h.setStopReason("单次运行已完成一轮，已停止")
+			cancel()
+		case ui.RunScheduled:
+			if !inRunWindow(h.nowFn(), policy.startMinute, policy.endMinute) {
+				h.setStopReason("计划时段已结束，已停止")
+				cancel()
+			}
+		}
+	}
+
+	h.mu.Lock()
 	h.rt = rt
 	h.cancel = cancel
-	h.running = true
+	h.mu.Unlock()
 
 	go func() {
 		_ = rt.Run(ctx)
-		h.mu.Lock()
-		h.running = false
-		h.mu.Unlock()
-		h.panel.PublishPhase("idle", "stopped", "引擎已停止")
+		h.finishRun("引擎已停止")
 	}()
-	h.panel.PublishPhase("running", "running", "引擎已启动（M2b 全量业务模块）")
+	h.panel.PublishPhase("running", "running", "引擎已启动（"+modeLabel(policy.mode)+"）")
+
+	if h.frameSource != nil && policy.unknownTimeoutSec > 0 {
+		go h.runObserver(ctx, cancel, policy)
+	}
+}
+
+// runObserver 运行中场景观测：周期截帧识别；未知场景持续超时或
+// 计划时段结束时停止引擎，并同步场景/置信度到面板。
+func (h *Host) runObserver(ctx context.Context, cancel context.CancelFunc, policy runPolicy) {
+	interval := h.observeInterval
+	if interval <= 0 {
+		interval = 3 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var unknownSince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if policy.mode == ui.RunScheduled && !inRunWindow(h.nowFn(), policy.startMinute, policy.endMinute) {
+				h.setStopReason("计划时段已结束，已停止")
+				cancel()
+				return
+			}
+			frame, err := h.captureFrame()
+			if err != nil {
+				continue
+			}
+			detection := game.DetectScene(frame)
+			now := h.nowFn()
+			if detection.Best == "" || detection.Confidence < policy.minConfidence {
+				if unknownSince.IsZero() {
+					unknownSince = now
+				} else if now.Sub(unknownSince) >= time.Duration(policy.unknownTimeoutSec)*time.Second {
+					h.setStopReason(fmt.Sprintf("未知场景超时（%ds 未识别到场景），已停止", policy.unknownTimeoutSec))
+					cancel()
+					return
+				}
+			} else {
+				unknownSince = time.Time{}
+			}
+			_ = h.panel.PublishObservation(detection.Best, h.currentActionCount())
+		}
+	}
+}
+
+// applySessionTaskPolicies 会话任务策略（面板草稿的优先级/单次上限）写入调度器。
+// 草稿缺省的 MaxRuns 回退任务目录默认值（与 register 注册时同一数据源）。
+func applySessionTaskPolicies(s *core.Scheduler, tasks map[string]ui.TaskSetting) {
+	for _, meta := range game.Catalog() {
+		setting, ok := tasks[meta.ID]
+		if !ok {
+			continue
+		}
+		policy := core.TaskPolicy{Priority: setting.Priority, MaxRuns: setting.MaxRuns}
+		if policy.MaxRuns < 1 {
+			policy.MaxRuns = game.TaskDefaultPolicy(meta.Name).MaxRuns
+		}
+		if !s.SetPolicy(meta.Name, policy) {
+			logger.Warn("[Host]", "任务 %q 未找到，策略未生效", meta.Name)
+		}
+	}
+}
+
+// setStopReason 记录运行结束原因（引擎/观测 goroutine 共用，finishRun 消费）。
+func (h *Host) setStopReason(reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.stopReason = reason
+}
+
+// currentActionCount 当前累计动作数（观测器发布用）。
+func (h *Host) currentActionCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.actionCount
+}
+
+// finishRun 运行结束清理：清除触控钩子、复位运行状态并发布停止消息。
+func (h *Host) finishRun(message string) {
+	touch.SetActionHook(nil)
+	h.mu.Lock()
+	h.running = false
+	h.rt = nil
+	if h.stopReason != "" {
+		message = h.stopReason
+		h.stopReason = ""
+	}
+	h.mu.Unlock()
+	h.panel.PublishPhase("idle", "stopped", message)
 }
 
 // pause 暂停引擎（轮间生效）。

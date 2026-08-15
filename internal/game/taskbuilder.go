@@ -35,6 +35,8 @@ type TaskOptions struct {
 	LeaveSquare func() bool
 	// Action 任务执行体。
 	Action func() error
+	// Policy 执行策略覆盖（优先级/单次上限）；MaxRuns 缺省时取任务目录默认值。
+	Policy core.TaskPolicy
 }
 
 // NewTask 创建并注册一个标准任务（封装开关、就绪、让渡、离开广场、日志）。
@@ -110,7 +112,23 @@ func NewTask(s *core.Scheduler, uc *userconfig.UserConfig, name string, opts Tas
 		return nil
 	}
 
-	s.Add(name, condition, action)
+	policy := opts.Policy
+	if policy.MaxRuns < 1 {
+		policy.MaxRuns = TaskDefaultPolicy(name).MaxRuns
+	}
+	s.AddWithPolicy(name, policy, condition, action)
+}
+
+// TaskDefaultPolicy 任务目录中的默认执行策略（按任务名；目录是唯一数据源，
+// 面板“单次上限”默认值与引擎注册共用）。
+// 未入目录的任务返回零策略（每轮一次，保持 Lua 行为）。
+func TaskDefaultPolicy(name string) core.TaskPolicy {
+	for _, meta := range Catalog() {
+		if meta.Name == name {
+			return core.TaskPolicy{MaxRuns: meta.MaxRuns}
+		}
+	}
+	return core.TaskPolicy{}
 }
 
 // runAction 执行动作并把 panic 转为错误。
