@@ -1,16 +1,23 @@
 package ui
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 const (
 	pillAutoCollapse      = 6 * time.Second
 	pillAnimationDuration = 220 * time.Millisecond
 	pillCollapsedWidth    = float32(330)
-	pillCollapsedHeight   = float32(42)
+	pillCollapsedHeight   = float32(56)
 	pillExpandedWidth     = float32(520)
-	pillExpandedHeight    = float32(88)
+	pillExpandedHeight    = float32(112)
+	pillButtonSize        = float32(52)
+	pillButtonGap         = float32(8)
 	pillControlsReadyAt   = float32(0.98)
 	pillControlsArmDelay  = 420 * time.Millisecond
+	pillConfirmHold       = 800 * time.Millisecond
+	exitArmWindow         = 2 * time.Second
 )
 
 type pillPoint struct {
@@ -57,26 +64,26 @@ func expandedPillLayout(x, y float32) pillLayout {
 // expandedPillLayoutForBounds keeps the compact controls anchored to the right
 // edge, leaving the larger left area available for runtime information.
 func expandedPillLayoutForBounds(x, y, width, height float32) pillLayout {
-	buttonY := y + (height-34)/2
+	buttonY := y + (height-pillButtonSize)/2
 	stopMaxX := x + width - 13
-	stopMinX := stopMaxX - 38
-	primaryMaxX := stopMinX - 6
-	primaryMinX := primaryMaxX - 38
-	configMaxX := primaryMinX - 6
-	configMinX := configMaxX - 34
+	stopMinX := stopMaxX - pillButtonSize
+	primaryMaxX := stopMinX - pillButtonGap
+	primaryMinX := primaryMaxX - pillButtonSize
+	configMaxX := primaryMinX - pillButtonGap
+	configMinX := configMaxX - pillButtonSize
 	return pillLayout{
 		body: pillRect{Min: pillPoint{X: x, Y: y}, Max: pillPoint{X: x + width, Y: y + height}},
 		config: pillRect{
 			Min: pillPoint{X: configMinX, Y: buttonY},
-			Max: pillPoint{X: configMaxX, Y: buttonY + 34},
+			Max: pillPoint{X: configMaxX, Y: buttonY + pillButtonSize},
 		},
 		primary: pillRect{
 			Min: pillPoint{X: primaryMinX, Y: buttonY},
-			Max: pillPoint{X: primaryMaxX, Y: buttonY + 34},
+			Max: pillPoint{X: primaryMaxX, Y: buttonY + pillButtonSize},
 		},
 		stop: pillRect{
 			Min: pillPoint{X: stopMinX, Y: buttonY},
-			Max: pillPoint{X: stopMaxX, Y: buttonY + 34},
+			Max: pillPoint{X: stopMaxX, Y: buttonY + pillButtonSize},
 		},
 	}
 }
@@ -141,25 +148,59 @@ type pillPointerState struct {
 	downTarget pillHitTarget
 	lastPoint  pillPoint
 	hasPoint   bool
+	holdSince  time.Time
 }
 
-func (state *pillPointerState) update(point pillPoint, down, clicked, released bool, layout pillLayout) pillHitTarget {
+func stopConfirmed(downFor time.Duration) bool {
+	return downFor >= pillConfirmHold
+}
+
+func confirmExit(frame *panelFrame, now time.Time, clicked bool) bool {
+	if !clicked {
+		if !frame.ExitArmedUntil.IsZero() && !now.Before(frame.ExitArmedUntil) {
+			frame.ExitArmedUntil = time.Time{}
+		}
+		return false
+	}
+	if !frame.ExitArmedUntil.IsZero() && now.Before(frame.ExitArmedUntil) {
+		frame.ExitArmedUntil = time.Time{}
+		return true
+	}
+	frame.ExitArmedUntil = now.Add(exitArmWindow)
+	return false
+}
+
+func (state *pillPointerState) update(point pillPoint, down, clicked, released bool, layout pillLayout, now time.Time) pillHitTarget {
 	validPoint := point.X >= 0 && point.Y >= 0
 	if down && validPoint {
 		target := layout.hit(point)
 		if !state.tracking && target != pillHitNone {
 			state.tracking = true
 			state.downTarget = target
+			if target == pillHitStop {
+				state.holdSince = now
+			}
 		}
 		if state.tracking {
 			state.lastPoint = point
 			state.hasPoint = true
+			if state.downTarget == pillHitStop && target == pillHitStop && stopConfirmed(now.Sub(state.holdSince)) {
+				state.tracking = false
+				state.downTarget = pillHitNone
+				state.holdSince = time.Time{}
+				state.lastPoint = pillPoint{}
+				state.hasPoint = false
+				return pillHitStop
+			}
 		}
 	} else if clicked && validPoint {
 		state.tracking = true
 		state.downTarget = layout.hit(point)
 		state.lastPoint = point
 		state.hasPoint = true
+		if state.downTarget == pillHitStop {
+			state.holdSince = now
+		}
 	}
 	if !released {
 		return pillHitNone
@@ -176,6 +217,10 @@ func (state *pillPointerState) update(point pillPoint, down, clicked, released b
 	state.downTarget = pillHitNone
 	state.lastPoint = pillPoint{}
 	state.hasPoint = false
+	state.holdSince = time.Time{}
+	if pressedTarget == pillHitStop || releasedTarget == pillHitStop {
+		return pillHitNone
+	}
 	if !wasTracking {
 		// AutoGo can expose only the release frame for a short emulator tap.
 		return releasedTarget
@@ -197,7 +242,10 @@ func applyPillHit(frame *panelFrame, hit pillHitTarget, commands []Command) []Co
 		frame.Compact = false
 		collapsePill(frame)
 	case pillHitPrimary:
-		_, commandType := pillPrimaryAction(frame.Status.Phase)
+		_, commandType, enabled := pillPrimaryAction(frame.Status.Phase, frame.Status.Outcome)
+		if !enabled {
+			return commands
+		}
 		command := Command{Type: commandType}
 		if commandType == CommandStart {
 			cfg := cloneDraft(frame.Draft)
@@ -219,13 +267,57 @@ func collapsePill(frame *panelFrame) {
 	frame.PillPointer = pillPointerState{}
 }
 
-func pillPrimaryAction(phase string) (string, CommandType) {
+func refreshPillCollapse(frame *panelFrame, now time.Time, pointerOverBody bool) {
+	if !frame.PillExpanded || !pointerOverBody {
+		return
+	}
+	frame.PillCollapseAt = now.Add(pillAutoCollapse)
+}
+
+func CompactPillHeadline(status RuntimeStatus, logs []string) string {
+	if status.Message != "" {
+		return status.Message
+	}
+	if len(logs) > 0 {
+		return logs[len(logs)-1]
+	}
+	scene := status.Scene
+	if scene == "" {
+		scene = "unknown"
+	}
+	outcome := status.Outcome
+	if outcome == "" {
+		outcome = "idle"
+	}
+	return fmt.Sprintf("%s · %s · 动作 %d", scene, outcome, status.ActionCount)
+}
+
+func pillPrimaryAction(phase, outcome string) (string, CommandType, bool) {
+	if outcome == "scheduled_wait" {
+		return "等待", CommandPause, false
+	}
 	switch phase {
 	case "running", "waiting":
-		return "暂停", CommandPause
+		return "暂停", CommandPause, true
 	case "paused":
-		return "继续", CommandResume
+		return "继续", CommandResume, true
 	default:
-		return "开始", CommandStart
+		return "开始", CommandStart, true
+	}
+}
+
+func pillExpandedState(phase, outcome string) string {
+	if outcome == "scheduled_wait" {
+		return "等待计划时段"
+	}
+	switch phase {
+	case "running", "waiting":
+		return "自动生产运行中"
+	case "paused":
+		return "脚本已暂停"
+	case "error":
+		return "脚本运行异常"
+	default:
+		return "脚本已停止"
 	}
 }

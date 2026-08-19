@@ -64,6 +64,9 @@ func SetEngine(e Engine) {
 	warnedNotReady = false
 }
 
+// Ready 是否已注入设备 OCR 引擎。
+func Ready() bool { return engine != nil }
+
 // SetSleep 注入休眠实现（测试用；未注入时以真实时间等待）。
 func SetSleep(fn func(ms int)) { sleepFn = fn }
 

@@ -60,6 +60,7 @@ func RegisterAll(s *core.Scheduler, g *core.Guard) {
 	}, registerTag)
 	g.Register("网络联机状态不稳定", unstable.Def.Feature,
 		unstable.ToGuardHandler(dialog.HandleOpts{Action: "confirm", WaitGoneMs: 2000}), 10)
+	RegisterSafetyGuards(g, popup.ResourceSpendDef(), popup.SensitivePageDef())
 
 	// 通用离开广场逻辑（对应 Lua task-builder leaveSquareIfNeeded）：非广场上下文直接放行。
 	leaveSquare := func() bool {

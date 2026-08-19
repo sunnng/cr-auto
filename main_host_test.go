@@ -13,6 +13,8 @@ import (
 	"app/internal/core"
 	"app/internal/game"
 	"app/internal/game/kingdom"
+	libcolor "app/internal/lib/color"
+	"app/internal/lib/ocr"
 	"app/internal/lib/store"
 	"app/internal/lib/touch"
 	"app/internal/lib/userconfig"
@@ -44,7 +46,28 @@ func waitFor(t *testing.T, cond func() bool) {
 func setupHostTest(t *testing.T) {
 	t.Helper()
 	store.SetDefault(store.New(filepath.Join(t.TempDir(), "store.json")))
-	t.Cleanup(func() { store.SetDefault(nil) })
+	libcolor.SetScreen(libcolor.NewScriptedScreen())
+	t.Cleanup(func() {
+		store.SetDefault(nil)
+		libcolor.SetScreen(nil)
+	})
+}
+
+func allReadyCapabilities() ui.Capabilities {
+	return ui.Capabilities{
+		OCRReady:                true,
+		VisionReady:             true,
+		ResourceGuardReady:      true,
+		SensitivePageGuardReady: true,
+		DeviceProfileValid:      true,
+	}
+}
+
+func newReadyHost(t *testing.T, panel *ui.Panel) *Host {
+	t.Helper()
+	host := NewHost(panel)
+	host.SetCapabilitiesProbe(allReadyCapabilities)
+	return host
 }
 
 // staticFrameSource 固定帧来源（识别诊断测试用）。
@@ -90,7 +113,7 @@ func kingdomHomeFrame() *image.NRGBA {
 func TestHostSaveAppliesTaskSwitches(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := ui.Default()
 	draft.Tasks = map[string]ui.TaskSetting{
@@ -128,7 +151,7 @@ func TestHostSaveAppliesTaskSwitches(t *testing.T) {
 func TestHostSaveRejectsNilSettings(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandSave})
 	if status := panel.Status(); status.Outcome != "config_error" {
@@ -139,7 +162,7 @@ func TestHostSaveRejectsNilSettings(t *testing.T) {
 func TestHostSaveRejectsInvalidDraftWithoutWriting(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := ui.Default()
 	draft.Safety.MinConfidence = 0.5 // 低于 0.90 下限
@@ -162,7 +185,7 @@ func TestHostSaveRejectsInvalidDraftWithoutWriting(t *testing.T) {
 func TestHostStartWithSettingsSavesThenRuns(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := ui.Default()
 	draft.Tasks = map[string]ui.TaskSetting{"mine_survey": {Enabled: false, MaxRuns: 1}}
@@ -184,7 +207,7 @@ func TestHostStartWithSettingsSavesThenRuns(t *testing.T) {
 func TestHostDiagnosticSavesFrame(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	dir := filepath.Join(t.TempDir(), "diag")
 	host.SetDiagnosticDir(dir)
 	host.SetFrameSource(&staticFrameSource{frame: image.NewNRGBA(image.Rect(0, 0, 16, 16))})
@@ -207,7 +230,7 @@ func TestHostDiagnosticSavesFrame(t *testing.T) {
 func TestHostDiagnosticWithoutFrameSource(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandDiagnostic})
 
@@ -219,8 +242,9 @@ func TestHostDiagnosticWithoutFrameSource(t *testing.T) {
 func TestHostInspectPublishesDetectionPreview(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+	libcolor.SetScreen(libcolor.HitFeatures(kingdom.Home().Feature))
 
 	host.Handle(ui.Command{Type: ui.CommandInspect})
 
@@ -242,7 +266,7 @@ func TestHostInspectPublishesDetectionPreview(t *testing.T) {
 func TestHostInspectWithoutFrameSource(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandInspect})
 
@@ -254,7 +278,7 @@ func TestHostInspectWithoutFrameSource(t *testing.T) {
 func TestTaskDescriptorsCatalog(t *testing.T) {
 	setupHostTest(t)
 
-	descriptors := taskDescriptors()
+	descriptors := taskDescriptors(allReadyCapabilities())
 	if len(descriptors) != 9 {
 		t.Fatalf("catalog must publish 9 tasks, got %d", len(descriptors))
 	}
@@ -268,7 +292,7 @@ func TestTaskDescriptorsCatalog(t *testing.T) {
 		}
 		seen[d.ID] = true
 		if !d.Available {
-			t.Fatalf("M2b task %q must be available", d.ID)
+			t.Fatalf("M2b task %q must be available when host capabilities are ready", d.ID)
 		}
 		if d.MaxRuns < 1 {
 			t.Fatalf("descriptor %q MaxRuns=%d", d.ID, d.MaxRuns)
@@ -281,6 +305,116 @@ func TestTaskDescriptorsCatalog(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskDescriptorsWaitForDeviceOCR(t *testing.T) {
+	setupHostTest(t)
+	caps := ui.Capabilities{VisionReady: true, DeviceProfileValid: true}
+	descriptors := taskDescriptors(caps)
+	if len(descriptors) == 0 {
+		t.Fatal("catalog must not be empty")
+	}
+	for _, d := range descriptors {
+		if d.Available {
+			t.Fatalf("%q must stay closed until device OCR is accepted", d.ID)
+		}
+		if d.UnavailableReason != "等待设备 OCR 验收" {
+			t.Fatalf("%q reason=%q", d.ID, d.UnavailableReason)
+		}
+	}
+}
+
+func TestHostAllowsStartWhenSafetyGuardsMissing(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := NewHost(panel)
+
+	caps := host.CurrentCapabilities()
+	if caps.ResourceGuardReady || caps.SensitivePageGuardReady {
+		t.Fatal("empty safety features must not claim guards ready")
+	}
+
+	host.Handle(ui.Command{Type: ui.CommandStart, RequestID: 7})
+	waitFor(t, func() bool { return host.isRunning() })
+
+	status := panel.Status()
+	if status.Outcome == "start_error" {
+		t.Fatalf("start must not be blocked by uncaptured safety features, message=%q", status.Message)
+	}
+	if status.RequestID != 7 {
+		t.Fatalf("request id=%d want 7", status.RequestID)
+	}
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
+func TestProfileFromDeviceMarksMismatch(t *testing.T) {
+	p := profileFromDevice(1280, 720, 240)
+	if p.Width != 1280 || p.RequiredWidth != 1600 {
+		t.Fatalf("%+v", p)
+	}
+	host := NewHost(openTestPanel(t))
+	host.SetDeviceProfileValid(p.Width == p.RequiredWidth && p.Height == p.RequiredHeight)
+	caps := host.CurrentCapabilities()
+	if caps.DeviceProfileValid {
+		t.Fatal("1280x720 must not be a valid device profile")
+	}
+}
+
+func TestProfileFromDeviceAcceptsContractSize(t *testing.T) {
+	p := profileFromDevice(1600, 900, 240)
+	if p.Width != 1600 || p.Height != 900 || p.DPI != 240 {
+		t.Fatalf("%+v", p)
+	}
+	host := NewHost(openTestPanel(t))
+	host.SetDeviceProfileValid(p.Width == p.RequiredWidth && p.Height == p.RequiredHeight)
+	if !host.CurrentCapabilities().DeviceProfileValid {
+		t.Fatal("1600x900 must be a valid device profile")
+	}
+}
+
+func TestProfileFromDeviceRejectsRotatedPortrait(t *testing.T) {
+	p := profileFromDevice(900, 1600, 240)
+	if p.Width == p.RequiredWidth && p.Height == p.RequiredHeight {
+		t.Fatal("rotated 900x1600 must not match the landscape contract")
+	}
+}
+
+func TestLandscapeMismatchAndSwapAreInvalid(t *testing.T) {
+	cases := [][2]int{{1280, 720}, {900, 1600}, {0, 0}}
+	for _, c := range cases {
+		p := profileFromDevice(c[0], c[1], 240)
+		valid := p.Width == p.RequiredWidth && p.Height == p.RequiredHeight
+		if valid {
+			t.Fatalf("unexpected valid %+v", c)
+		}
+	}
+	p := profileFromDevice(1600, 900, 240)
+	if p.Width != 1600 || p.Height != 900 {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestDetectCapabilitiesReportsOCRFromEngine(t *testing.T) {
+	setupHostTest(t)
+	ocr.SetEngine(nil)
+	t.Cleanup(func() { ocr.SetEngine(nil) })
+	caps := detectCapabilities()
+	if caps.OCRReady {
+		t.Fatal("OCR must be unread until an engine is injected")
+	}
+	ocr.SetEngine(&fakeHostOCR{})
+	caps = detectCapabilities()
+	if !caps.OCRReady {
+		t.Fatal("injected OCR engine must set OCRReady")
+	}
+}
+
+type fakeHostOCR struct{}
+
+func (*fakeHostOCR) Scan(rect image.Rectangle, mode int, returnType string) (string, error) {
+	return "", nil
+}
+func (*fakeHostOCR) FindTapPoint(string, image.Rectangle) (int, int, bool) { return 0, 0, false }
 
 // TestGameSceneKeysHaveDisplayNames 识别诊断页的场景键（game）必须都有中文显示名
 // （ui），防止 detect.go / ui/detection.go 两侧键值漂移（add scene 时三处同步）。
@@ -332,7 +466,7 @@ func TestInitialSettingsSeedsTaskSwitchesFromUserConfig(t *testing.T) {
 
 func TestHostStartRunsAndStopHalts(t *testing.T) {
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandStart})
 	waitFor(t, func() bool { return host.isRunning() })
@@ -343,9 +477,23 @@ func TestHostStartRunsAndStopHalts(t *testing.T) {
 	waitFor(t, func() bool { return !host.isRunning() })
 }
 
+func TestHostStopDoesNotNeedToBeFollowedByProcessExit(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := newReadyHost(t, panel)
+	host.Handle(ui.Command{Type: ui.CommandStart})
+	waitFor(t, func() bool { return host.isRunning() })
+	host.Handle(ui.Command{Type: ui.CommandStop})
+	waitFor(t, func() bool { return !host.isRunning() })
+	host.Handle(ui.Command{Type: ui.CommandStart})
+	waitFor(t, func() bool { return host.isRunning() })
+	host.stop()
+	waitFor(t, func() bool { return !host.isRunning() })
+}
+
 func TestHostStartIsIdempotent(t *testing.T) {
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandStart})
 	host.Handle(ui.Command{Type: ui.CommandStart})
@@ -366,7 +514,7 @@ func TestHostStartIsIdempotent(t *testing.T) {
 
 func TestHostPauseResume(t *testing.T) {
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	host.Handle(ui.Command{Type: ui.CommandStart})
 	waitFor(t, func() bool { return host.isRunning() })
@@ -379,7 +527,7 @@ func TestHostPauseResume(t *testing.T) {
 
 func TestHostStopWithoutEngineIsNoop(t *testing.T) {
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	if host.stop() {
 		t.Fatal("stop without engine must report false")
 	}
@@ -387,7 +535,7 @@ func TestHostStopWithoutEngineIsNoop(t *testing.T) {
 
 func TestHostEngineStartsWithRegisterInjection(t *testing.T) {
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	host.Handle(ui.Command{Type: ui.CommandStart})
 	waitFor(t, func() bool { return host.isRunning() })
 
@@ -425,7 +573,7 @@ func allTasksDisabled() ui.Draft {
 func TestHostRunOnceStopsAfterOneRound(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := allTasksDisabled()
 	draft.Run.Mode = ui.RunOnce
@@ -439,7 +587,7 @@ func TestHostRunOnceStopsAfterOneRound(t *testing.T) {
 func TestHostActionBudgetStopsEngine(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := allTasksDisabled()
 	draft.Safety.MaxActionsPerRun = 3
@@ -459,7 +607,7 @@ func TestHostActionBudgetStopsEngine(t *testing.T) {
 func TestHostActionCountPublishedToPanel(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := allTasksDisabled()
 	draft.Safety.MaxActionsPerRun = 100
@@ -475,7 +623,7 @@ func TestHostActionCountPublishedToPanel(t *testing.T) {
 func TestHostUnknownSceneTimeoutStopsEngine(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	host.SetFrameSource(&staticFrameSource{frame: image.NewNRGBA(image.Rect(0, 0, 1600, 900))})
 	host.observeInterval = 100 * time.Millisecond
 
@@ -499,8 +647,9 @@ func TestHostUnknownSceneTimeoutStopsEngine(t *testing.T) {
 func TestHostSceneObservedIntoStatus(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+	libcolor.SetScreen(libcolor.HitFeatures(kingdom.Home().Feature))
 	host.observeInterval = 100 * time.Millisecond
 
 	draft := allTasksDisabled()
@@ -516,7 +665,7 @@ func TestHostSceneObservedIntoStatus(t *testing.T) {
 func TestHostScheduledWaitsOutsideWindowThenStarts(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	fakeNow := time.Date(2026, 8, 15, 10, 0, 0, 0, time.Local)
 	host.nowFn = func() time.Time { return fakeNow }
@@ -549,9 +698,10 @@ func TestHostScheduledWaitsOutsideWindowThenStarts(t *testing.T) {
 func TestHostScheduledStopsWhenWindowEnds(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 	// 帧来源存在时窗口结束由观测器检测（100ms 级），与设备端一致。
 	host.SetFrameSource(&staticFrameSource{frame: kingdomHomeFrame()})
+	libcolor.SetScreen(libcolor.HitFeatures(kingdom.Home().Feature))
 	host.observeInterval = 100 * time.Millisecond
 
 	fakeNow := time.Date(2026, 8, 15, 10, 5, 0, 0, time.Local)
@@ -578,7 +728,7 @@ func TestHostScheduledStopsWhenWindowEnds(t *testing.T) {
 func TestHostScheduledFullDayWindowRunsLikeManual(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := allTasksDisabled()
 	draft.Run.Mode = ui.RunScheduled
@@ -595,10 +745,34 @@ func TestHostScheduledFullDayWindowRunsLikeManual(t *testing.T) {
 	waitFor(t, func() bool { return !host.isRunning() })
 }
 
+func TestHostPauseDuringScheduledWaitKeepsWaiting(t *testing.T) {
+	setupHostTest(t)
+	panel := openTestPanel(t)
+	host := newReadyHost(t, panel)
+	host.nowFn = func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local) }
+	draft := ui.Default()
+	draft.Run.Mode = ui.RunScheduled
+	draft.Run.StartMinute = 600
+	draft.Run.EndMinute = 700
+	host.Handle(ui.Command{Type: ui.CommandStart, Settings: &draft})
+	waitFor(t, func() bool { return panel.Status().Outcome == "scheduled_wait" })
+	host.Handle(ui.Command{Type: ui.CommandPause})
+	if panel.Status().Outcome != "scheduled_wait" {
+		t.Fatalf("outcome=%q", panel.Status().Outcome)
+	}
+	if host.isRunning() != true {
+		t.Fatal("wait must continue")
+	}
+	if !strings.Contains(panel.Status().Message, "无法暂停") {
+		t.Fatalf("pause during wait must explain itself: %q", panel.Status().Message)
+	}
+	host.stop()
+}
+
 func TestHostStartAppliesSessionTaskPolicies(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	draft := allTasksDisabled()
 	draft.Tasks["square"] = ui.TaskSetting{Enabled: false, Priority: 100, MaxRuns: 1}
@@ -630,7 +804,7 @@ func TestHostStartAppliesSessionTaskPolicies(t *testing.T) {
 func TestHostPillStartWithoutSettingsRunsManual(t *testing.T) {
 	setupHostTest(t)
 	panel := openTestPanel(t)
-	host := NewHost(panel)
+	host := newReadyHost(t, panel)
 
 	// 悬浮胶囊启动：无草稿 → 手动模式、无预算/超时限制。
 	host.Handle(ui.Command{Type: ui.CommandStart})

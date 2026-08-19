@@ -23,6 +23,14 @@ func TestConfigTabsExposeTheFourImplementedPages(t *testing.T) {
 	}
 }
 
+func TestConfigTabsReturnsStableBackingStore(t *testing.T) {
+	a := ConfigTabs()
+	b := ConfigTabs()
+	if &a[0] != &b[0] {
+		t.Fatal("ConfigTabs must not allocate a new backing array every call")
+	}
+}
+
 func TestDraftValidateRejectsBadTaskPolicies(t *testing.T) {
 	draft := Default()
 	draft.Tasks["mine_survey"] = TaskSetting{Enabled: true, Priority: 101, MaxRuns: 1}
@@ -101,6 +109,31 @@ func TestPanelOwnsDraftAndEmitsIndependentSettingsCopy(t *testing.T) {
 	}
 	if got := initial.Tasks["daily"].Priority; got != 50 {
 		t.Fatalf("panel mutated caller settings: priority=%d", got)
+	}
+}
+
+func TestReadFrameSharesDraftMapWithRenderer(t *testing.T) {
+	panel := NewPanel()
+	_ = panel.Open(Snapshot{Settings: Default()}, func(Command) {})
+	defer panel.Close()
+	frame, _ := panel.readFrame()
+	frame.Draft.Run.Mode = RunOnce
+	panel.writeFrame(frame)
+	next, _ := panel.readFrame()
+	if next.Draft.Run.Mode != RunOnce {
+		t.Fatal("renderer draft edits must round-trip")
+	}
+}
+
+func TestReadFrameDoesNotCloneCatalogWhenHostQuiet(t *testing.T) {
+	panel := NewPanel()
+	catalog := []TaskDescriptor{{ID: "a", Name: "A", Available: true, MaxRuns: 1}}
+	_ = panel.Open(Snapshot{Settings: Default(), Catalog: catalog}, func(Command) {})
+	defer panel.Close()
+	a, _ := panel.readFrame()
+	b, _ := panel.readFrame()
+	if &a.Catalog[0] != &b.Catalog[0] {
+		t.Fatal("quiet host must not recopy catalog each frame")
 	}
 }
 
@@ -292,5 +325,158 @@ func TestPanelPublishesRuntimeDetectionPreviewWithoutAliasingEvidence(t *testing
 	}
 	if got := frame.Preview.Detection.Candidates[0].Score; got != 0.97 {
 		t.Fatalf("preview evidence was aliased: score=%v", got)
+	}
+}
+
+func TestPanelWriteFrameDoesNotClobberConcurrentPublish(t *testing.T) {
+	panel := NewPanel()
+	if err := panel.Open(Snapshot{Settings: Default()}, func(Command) {}); err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+
+	if err := panel.PublishPhase("idle", "configure", "初始反馈"); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok := panel.readFrame()
+	if !ok {
+		t.Fatal("opened panel did not expose a frame")
+	}
+
+	if err := panel.PublishPhase("running", "running", "最新反馈"); err != nil {
+		t.Fatal(err)
+	}
+	frame.ActiveTab = 2
+	panel.writeFrame(frame)
+
+	next, ok := panel.readFrame()
+	if !ok {
+		t.Fatal("panel closed unexpectedly")
+	}
+	if next.Feedback != "最新反馈" {
+		t.Fatalf("writeFrame overwrote host feedback: %q", next.Feedback)
+	}
+	if next.Status.Phase != "running" || next.Status.Outcome != "running" {
+		t.Fatalf("writeFrame overwrote host status: %+v", next.Status)
+	}
+	if len(next.Logs) == 0 || next.Logs[len(next.Logs)-1] != "unknown · running · 动作 0" {
+		t.Fatalf("writeFrame overwrote host logs: %v", next.Logs)
+	}
+	if next.ActiveTab != 2 {
+		t.Fatalf("renderer tab write was dropped: %d", next.ActiveTab)
+	}
+}
+
+func TestPanelStartWaitsForMatchingRunningBeforeCompact(t *testing.T) {
+	var started Command
+	panel := NewPanel()
+	if err := panel.Open(Snapshot{Settings: Default()}, func(command Command) { started = command }); err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+
+	draft := Default()
+	panel.emit(Command{Type: CommandStart, Settings: &draft})
+	if started.Type != CommandStart || started.RequestID == 0 {
+		t.Fatalf("start command must carry a request id: %+v", started)
+	}
+
+	frame, ok := panel.readFrame()
+	if !ok || frame.Compact || !frame.Starting {
+		t.Fatalf("start must stay on the panel until the host confirms: %+v", frame)
+	}
+
+	if err := panel.PublishCommandResult(started.RequestID+1, "idle", "config_error", "旧请求失败"); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok = panel.readFrame()
+	if !ok || frame.Compact || !frame.Starting {
+		t.Fatalf("stale start error must not finish the in-flight request: %+v", frame)
+	}
+
+	if err := panel.PublishCommandResult(started.RequestID, "running", "running", "引擎已启动"); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok = panel.readFrame()
+	if !ok || !frame.Compact || frame.Starting {
+		t.Fatalf("matching running result must collapse to the pill: %+v", frame)
+	}
+}
+
+func TestPanelStartErrorKeepsPanelExpanded(t *testing.T) {
+	var started Command
+	panel := NewPanel()
+	if err := panel.Open(Snapshot{Settings: Default()}, func(command Command) { started = command }); err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+
+	panel.SetCompact(true)
+	draft := Default()
+	panel.emit(Command{Type: CommandStart, Settings: &draft})
+
+	if err := panel.PublishCommandResult(started.RequestID, "idle", "config_error", "保存配置失败"); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok := panel.readFrame()
+	if !ok || frame.Compact || frame.Starting {
+		t.Fatalf("start error must reopen the panel: %+v", frame)
+	}
+	if frame.Feedback != "保存配置失败" {
+		t.Fatalf("start error feedback=%q", frame.Feedback)
+	}
+}
+
+func TestPanelDirtyTracksUnsavedDraftEdits(t *testing.T) {
+	panel := NewPanel()
+	_ = panel.Open(Snapshot{Settings: Default()}, func(Command) {})
+	defer panel.Close()
+	frame, _ := panel.readFrame()
+	if frame.Dirty {
+		t.Fatal("fresh panel must be clean")
+	}
+	frame.Draft.Run.Mode = RunOnce
+	panel.writeFrame(frame)
+	next, _ := panel.readFrame()
+	if !next.Dirty {
+		t.Fatal("mode change must mark dirty")
+	}
+	_ = panel.PublishPhase("idle", "config_saved", "配置已保存")
+	next, _ = panel.readFrame()
+	if next.Dirty {
+		t.Fatal("config_saved must clear dirty")
+	}
+}
+
+func TestPanelPublishCapabilitiesProjectsIntoFrame(t *testing.T) {
+	panel := NewPanel()
+	if err := panel.Open(Snapshot{Settings: Default(), Capabilities: Capabilities{VisionReady: true}}, func(Command) {}); err != nil {
+		t.Fatal(err)
+	}
+	defer panel.Close()
+
+	frame, ok := panel.readFrame()
+	if !ok || !frame.Capabilities.VisionReady || frame.Capabilities.OCRReady {
+		t.Fatalf("open snapshot capabilities not projected: %+v", frame.Capabilities)
+	}
+	want := readyCapabilities()
+	if err := panel.PublishCapabilities(want); err != nil {
+		t.Fatal(err)
+	}
+	frame, ok = panel.readFrame()
+	if !ok || frame.Capabilities != want {
+		t.Fatalf("published capabilities not projected: %+v", frame.Capabilities)
+	}
+}
+
+func TestPanelExpandsWhenHostStops(t *testing.T) {
+	panel := NewPanel()
+	_ = panel.Open(Snapshot{Settings: Default()}, func(Command) {})
+	defer panel.Close()
+	panel.SetCompact(true)
+	_ = panel.PublishPhase("idle", "stopped", "引擎已停止")
+	frame, _ := panel.readFrame()
+	if frame.Compact {
+		t.Fatal("stopped engine must restore the control panel")
 	}
 }

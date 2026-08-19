@@ -1,9 +1,7 @@
 package color
 
 import (
-	"errors"
 	"image"
-	"image/color"
 	"sync"
 	"testing"
 	"time"
@@ -12,42 +10,10 @@ import (
 	"app/internal/vision"
 )
 
-var errNoFrame = errors.New("color: 无帧来源")
-
-// fakeSource 每次 Capture 按序返回给定帧；耗尽后重复最后一帧。
-type fakeSource struct {
-	frames []*image.NRGBA
-	idx    int
-}
-
-func (f *fakeSource) Capture() (*image.NRGBA, error) {
-	if len(f.frames) == 0 {
-		return nil, errNoFrame
-	}
-	frame := f.frames[f.idx]
-	if f.idx < len(f.frames)-1 {
-		f.idx++
-	}
-	return frame, nil
-}
-
-func frameWith(colorAt map[int]uint32) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, 10, 10))
-	for x := 0; x < 10; x++ {
-		for y := 0; y < 10; y++ {
-			img.SetNRGBA(x, y, color.NRGBA{})
-		}
-	}
-	for key, rgb := range colorAt {
-		img.SetNRGBA(key/1000, key%1000, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb)})
-	}
-	return img
-}
-
-func install(t *testing.T, src FrameSource) func() {
+func install(t *testing.T, s Screen) func() {
 	t.Helper()
-	prevSource, prevHook, prevNow, prevSleep := frameSource, guardHook, nowFn, sleepFn
-	SetFrameSource(src)
+	prevScreen, prevHook, prevNow, prevSleep := screen, guardHook, nowFn, sleepFn
+	SetScreen(s)
 	var mu sync.Mutex
 	now := time.Unix(1000, 0)
 	SetNow(func() time.Time {
@@ -61,40 +27,41 @@ func install(t *testing.T, src FrameSource) func() {
 		mu.Unlock()
 	})
 	return func() {
-		SetFrameSource(prevSource)
+		SetScreen(prevScreen)
 		SetGuardHook(prevHook)
 		SetNow(prevNow)
 		SetSleep(prevSleep)
 	}
 }
 
-func TestMatchUsesCurrentFrame(t *testing.T) {
-	src := &fakeSource{frames: []*image.NRGBA{
-		frameWith(map[int]uint32{1001: 0xff0000}),
-	}}
-	defer install(t, src)()
+func TestMatchUsesScreen(t *testing.T) {
 	f := vision.Feature{Points: "1|1|ff0000-000000"}
+	defer install(t, HitFeatures(f))()
 	if !Match(f) {
-		t.Fatal("feature must match red pixel at (1,1)")
+		t.Fatal("feature must match")
 	}
 	if Match(vision.Feature{Points: "2|2|00ff00-000000"}) {
-		t.Fatal("feature must not match background")
+		t.Fatal("unregistered feature must not match")
 	}
 }
 
-func TestMatchWithoutFrameSource(t *testing.T) {
+func TestMatchWithoutScreen(t *testing.T) {
 	defer install(t, nil)()
 	if Match(vision.Feature{Points: "1|1|ff0000-000000"}) {
-		t.Fatal("no frame source must not match")
+		t.Fatal("no screen must not match")
 	}
 }
 
 func TestWaitPollsUntilHit(t *testing.T) {
-	red := frameWith(map[int]uint32{1001: 0xff0000})
-	black := frameWith(nil)
-	src := &fakeSource{frames: []*image.NRGBA{black, black, red}}
-	defer install(t, src)()
 	f := vision.Feature{Points: "1|1|ff0000-000000"}
+	want := vision.DetectsColors(f)
+	n := 0
+	s := NewScriptedScreen()
+	s.DetectsFn = func(colors string, sim float32) bool {
+		n++
+		return n >= 3 && colors == want
+	}
+	defer install(t, s)()
 	ok, which := Wait(f, 10000, 50)
 	if !ok || which != -1 {
 		t.Fatalf("wait must hit, ok=%v which=%d", ok, which)
@@ -102,8 +69,7 @@ func TestWaitPollsUntilHit(t *testing.T) {
 }
 
 func TestWaitTimesOut(t *testing.T) {
-	src := &fakeSource{frames: []*image.NRGBA{frameWith(nil)}}
-	defer install(t, src)()
+	defer install(t, NewScriptedScreen())()
 	ok, _ := Wait(vision.Feature{Points: "1|1|ff0000-000000"}, 10, 2)
 	if ok {
 		t.Fatal("wait must time out")
@@ -111,13 +77,14 @@ func TestWaitTimesOut(t *testing.T) {
 }
 
 func TestWaitAny(t *testing.T) {
-	green := frameWith(map[int]uint32{3003: 0x00ff00})
-	src := &fakeSource{frames: []*image.NRGBA{frameWith(nil), green}}
-	defer install(t, src)()
+	green := vision.Feature{Points: "3|3|00ff00-000000"}
+	s := NewScriptedScreen()
+	defer install(t, s)()
 	features := []vision.Feature{
 		{Points: "1|1|ff0000-000000"},
-		{Points: "3|3|00ff00-000000"},
+		green,
 	}
+	s.Hit(green)
 	ok, which := Wait(features, 10000, 50)
 	if !ok || which != 1 {
 		t.Fatalf("wait any: ok=%v which=%d", ok, which)
@@ -125,33 +92,44 @@ func TestWaitAny(t *testing.T) {
 }
 
 func TestWaitGone(t *testing.T) {
-	red := frameWith(map[int]uint32{1001: 0xff0000})
-	src := &fakeSource{frames: []*image.NRGBA{red, red, frameWith(nil)}}
-	defer install(t, src)()
 	f := vision.Feature{Points: "1|1|ff0000-000000"}
+	want := vision.DetectsColors(f)
+	n := 0
+	s := NewScriptedScreen()
+	s.DetectsFn = func(colors string, sim float32) bool {
+		if colors != want {
+			return false
+		}
+		n++
+		return n < 3
+	}
+	defer install(t, s)()
 	if !WaitGone(f, 10000, 50) {
 		t.Fatal("feature must disappear")
 	}
 }
 
 func TestTapUntilMatchTapsUntilFeatureAppears(t *testing.T) {
-	green := frameWith(map[int]uint32{2002: 0x00ff00})
-	src := &fakeSource{frames: []*image.NRGBA{frameWith(nil), frameWith(nil), green}}
-	defer install(t, src)()
+	green := vision.Feature{Points: "2|2|00ff00-000000"}
+	want := vision.DetectsColors(green)
+	n := 0
+	s := NewScriptedScreen()
+	s.DetectsFn = func(colors string, sim float32) bool {
+		n++
+		return n >= 3 && colors == want
+	}
+	defer install(t, s)()
 
 	var taps int
 	touch.SetPerform(touch.Perform{
-		Tap: func(x, y int) { taps++ },
-		Sleep: func(ms int) {
-			// 每次点击后模拟画面变化：已由帧序列表达。
-		},
+		Tap:    func(x, y int) { taps++ },
 		Random: func(min, max int) int { return max },
 	})
 	defer touch.SetPerform(touch.Perform{})
 
 	ok, which := TapUntilMatch(
 		image.Point{X: 5, Y: 5},
-		vision.Feature{Points: "2|2|00ff00-000000"},
+		green,
 		TapOpts{TimeoutMs: 10000, IntervalMs: 50, TapDelayMs: 10},
 	)
 	if !ok || which != -1 {
@@ -163,8 +141,7 @@ func TestTapUntilMatchTapsUntilFeatureAppears(t *testing.T) {
 }
 
 func TestTapUntilMatchMaxTaps(t *testing.T) {
-	src := &fakeSource{frames: []*image.NRGBA{frameWith(nil)}}
-	defer install(t, src)()
+	defer install(t, NewScriptedScreen())()
 	var taps int
 	touch.SetPerform(touch.Perform{
 		Tap:    func(x, y int) { taps++ },
@@ -186,16 +163,14 @@ func TestTapUntilMatchMaxTaps(t *testing.T) {
 }
 
 func TestFindAndTapFind(t *testing.T) {
-	src := &fakeSource{frames: []*image.NRGBA{
-		frameWith(map[int]uint32{4004: 0xff0000, 5005: 0x00ff00}),
-	}}
-	defer install(t, src)()
 	def := vision.FindDef{
 		Region:       image.Rect(0, 0, 10, 10),
 		FirstColor:   "ff0000-000000",
 		OffsetColors: "1,1,00ff00-000000",
 		Sim:          1,
 	}
+	s := NewScriptedScreen().FindAt(def, image.Pt(4, 4))
+	defer install(t, s)()
 	x, y, ok := Find(def)
 	if !ok || x != 4 || y != 4 {
 		t.Fatalf("find: (%d,%d) ok=%v", x, y, ok)
@@ -220,13 +195,80 @@ func TestFindAndTapFind(t *testing.T) {
 }
 
 func TestFindAll(t *testing.T) {
-	src := &fakeSource{frames: []*image.NRGBA{
-		frameWith(map[int]uint32{2002: 0xff0000, 5005: 0xff0000}),
-	}}
-	defer install(t, src)()
 	def := vision.FindDef{Region: image.Rect(0, 0, 10, 10), FirstColor: "ff0000-000000", Sim: 1}
+	s := NewScriptedScreen().FindAt(def, image.Pt(2, 2), image.Pt(5, 5))
+	defer install(t, s)()
 	points := FindAll(def)
 	if len(points) != 2 {
 		t.Fatalf("points=%v", points)
 	}
+}
+
+func TestMatchRGB(t *testing.T) {
+	s := NewScriptedScreen()
+	s.cmp[cmpKey{x: 10, y: 20, spec: "ff0000-101010"}] = true
+	defer install(t, s)()
+	if !MatchRGB(10, 20, "ff0000-101010", 0.95) {
+		t.Fatal("cmp must hit")
+	}
+	if MatchRGB(0, 0, "ff0000-101010", 0.95) {
+		t.Fatal("other point must miss")
+	}
+}
+
+func TestMatchPoints(t *testing.T) {
+	f := vision.Feature{Points: "1|1|ff0000-000000,2|2|00ff00-000000"}
+	s := NewScriptedScreen()
+	pts, err := vision.ParsePoints(f.Points)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.HitPoint(pts[0])
+	defer install(t, s)()
+	results, ok := MatchPoints(f)
+	if ok {
+		t.Fatal("partial must not satisfy all-points")
+	}
+	if len(results) != 2 || !results[0].Matched || results[1].Matched {
+		t.Fatalf("results=%+v", results)
+	}
+}
+
+func TestSessionNestsBeginEnd(t *testing.T) {
+	var begins, ends int
+	s := &countingScreen{inner: NewScriptedScreen(), onBegin: func() { begins++ }, onEnd: func() { ends++ }}
+	defer install(t, s)()
+	Session(func() {
+		Match(vision.Feature{Points: "1|1|ff0000-000000"})
+	})
+	if begins != 2 || ends != 2 {
+		t.Fatalf("nested session begins=%d ends=%d", begins, ends)
+	}
+}
+
+type countingScreen struct {
+	inner   Screen
+	onBegin func()
+	onEnd   func()
+}
+
+func (c *countingScreen) Begin() {
+	c.onBegin()
+	c.inner.Begin()
+}
+func (c *countingScreen) End() {
+	c.onEnd()
+	c.inner.End()
+}
+func (c *countingScreen) DetectsMultiColors(colors string, sim float32) bool {
+	return c.inner.DetectsMultiColors(colors, sim)
+}
+func (c *countingScreen) CmpColor(x, y int, colorStr string, sim float32) bool {
+	return c.inner.CmpColor(x, y, colorStr, sim)
+}
+func (c *countingScreen) FindMultiColors(x1, y1, x2, y2 int, colors string, sim float32, dir int) (int, int) {
+	return c.inner.FindMultiColors(x1, y1, x2, y2, colors, sim, dir)
+}
+func (c *countingScreen) FindMultiColorsAll(x1, y1, x2, y2 int, colors string, sim float32, dir int) []image.Point {
+	return c.inner.FindMultiColorsAll(x1, y1, x2, y2, colors, sim, dir)
 }

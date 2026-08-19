@@ -79,10 +79,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -95,7 +98,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -131,15 +134,15 @@ func TestSessionWaitLifecycle(t *testing.T) {
 
 func TestJellyPageDetection(t *testing.T) {
 	features := mine.Jelly()
-	setupTest(t, frameOf(fSpec(features.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Feature), nil)
 	if !IsJellyPage() {
 		t.Fatal("jelly page feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.Config.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Config.Feature), nil)
 	if !IsConfigPage() {
 		t.Fatal("config page feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.ClaimAllFeature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.ClaimAllFeature), nil)
 	if !CanClaimAll() {
 		t.Fatal("claim-all feature must be detected")
 	}

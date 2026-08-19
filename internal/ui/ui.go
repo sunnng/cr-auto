@@ -43,24 +43,22 @@ type ConfigTabState struct {
 
 // ConfigTabs lists the four implemented configuration pages in navigation
 // order. Every page is always available; there is no capability gate in this
-// package.
+// package. The returned slice is package data and must not be mutated.
 func ConfigTabs() []ConfigTabState {
-	all := []ConfigTabState{
-		{ID: ConfigTabOverview, Label: "概览", Title: "运行概览", Description: "确认运行方式与环境状态，再启动安全视觉引擎。"},
-		{ID: ConfigTabTasks, Label: "任务", Title: "功能任务", Description: "只有完成视觉素材和结果验证的任务才能启用。"},
-		{ID: ConfigTabSafety, Label: "安全", Title: "安全策略", Description: "所有阈值直接约束引擎，强制安全锁无法关闭。"},
-		{ID: ConfigTabDetection, Label: "识别", Title: "识别诊断", Description: "查看原始截图、锚点命中和场景置信度，不执行任何动作。"},
-	}
-	for i := range all {
-		all[i].Available = true
-	}
-	return all
+	return configTabs
+}
+
+var configTabs = []ConfigTabState{
+	{ID: ConfigTabOverview, Label: "概览", Title: "运行概览", Description: "确认运行方式与环境状态，再启动安全视觉引擎。", Available: true},
+	{ID: ConfigTabTasks, Label: "任务", Title: "功能任务", Description: "只有完成视觉素材和结果验证的任务才能启用。", Available: true},
+	{ID: ConfigTabSafety, Label: "安全", Title: "安全策略", Description: "所有阈值直接约束引擎，强制安全锁无法关闭。", Available: true},
+	{ID: ConfigTabDetection, Label: "识别", Title: "识别诊断", Description: "查看原始截图、锚点命中和场景置信度，不执行任何动作。", Available: true},
 }
 
 // NormalizeConfigTab prevents a stale navigation value from selecting a page
 // that does not exist.
 func NormalizeConfigTab(tab ConfigTab) ConfigTab {
-	for _, state := range ConfigTabs() {
+	for _, state := range configTabs {
 		if state.ID == tab {
 			return tab
 		}
@@ -76,6 +74,7 @@ type RuntimeStatus struct {
 	FrameID     uint64 `json:"frameId"`
 	ActionCount int    `json:"actionCount"`
 	UpdatedAt   string `json:"updatedAt"`
+	RequestID   uint64 `json:"requestId,omitempty"`
 }
 
 // Frame is a host-supplied screen capture for the diagnostic page. It is the
@@ -97,9 +96,44 @@ type DetectionPreview struct {
 }
 
 type Snapshot struct {
-	Settings Draft            `json:"settings"`
-	Catalog  []TaskDescriptor `json:"catalog"`
-	Status   RuntimeStatus    `json:"status"`
+	Settings     Draft            `json:"settings"`
+	Catalog      []TaskDescriptor `json:"catalog"`
+	Status       RuntimeStatus    `json:"status"`
+	Capabilities Capabilities     `json:"capabilities"`
+	Display      DisplayProfile   `json:"display"`
+}
+
+// DisplayProfile is the host-published screen contract. The control panel
+// never probes the device; it only lays out from these facts.
+type DisplayProfile struct {
+	Width, Height                 int
+	RequiredWidth, RequiredHeight int
+	DPI                           int
+	SafeMinX, SafeMinY            int
+	SafeMaxX, SafeMaxY            int
+}
+
+func DefaultDisplayProfile() DisplayProfile {
+	return DisplayProfile{
+		Width: 1600, Height: 900,
+		RequiredWidth: 1600, RequiredHeight: 900,
+		DPI:      240,
+		SafeMinX: 0, SafeMinY: 0, SafeMaxX: 1600, SafeMaxY: 900,
+	}
+}
+
+func panelWindowGeometry(profile DisplayProfile) (x, y, width, height float32) {
+	width = 1160
+	if max := float32(profile.Width - 80); profile.Width > 80 && max < width {
+		width = max
+	}
+	height = 780
+	if max := float32(profile.Height - 120); profile.Height > 120 && max < height {
+		height = max
+	}
+	x = (float32(profile.Width) - width) / 2
+	y = float32(profile.SafeMinY + 55)
+	return
 }
 
 type CommandType string
@@ -110,13 +144,15 @@ const (
 	CommandPause      CommandType = "engine.pause"
 	CommandResume     CommandType = "engine.resume"
 	CommandStop       CommandType = "engine.stop"
+	CommandExit       CommandType = "engine.exit"
 	CommandDiagnostic CommandType = "diagnostics.snapshot"
 	CommandInspect    CommandType = "diagnostics.inspect"
 )
 
 type Command struct {
-	Type     CommandType
-	Settings *Draft
+	Type      CommandType
+	RequestID uint64
+	Settings  *Draft
 }
 
 // Panel contains renderer-independent state. The AutoGo ImGui renderer lives
@@ -133,6 +169,11 @@ type Panel struct {
 	compact   bool
 	logs      []string
 
+	capabilities   Capabilities
+	display        DisplayProfile
+	requestSeq     uint64
+	pendingStartID uint64
+
 	activeTab          int32
 	pillExpanded       bool
 	pillExpansion      float32
@@ -148,6 +189,10 @@ type Panel struct {
 	captureError       error
 	captureAcked       bool
 	captureReadyFrames int
+	stopExpandGen      uint64
+	appliedStopExpand  uint64
+	exitArmedUntil     time.Time
+	saved              Draft
 }
 
 type panelFrame struct {
@@ -157,16 +202,21 @@ type panelFrame struct {
 	Feedback        string
 	ActiveTab       int32
 	Compact         bool
+	Starting        bool
 	Logs            []string
+	Capabilities    Capabilities
+	Display         DisplayProfile
 	PillExpanded    bool
 	PillExpansion   float32
 	PillAnimationAt time.Time
 	PillControlsAt  time.Time
 	PillCollapseAt  time.Time
 	PillPointer     pillPointerState
+	ExitArmedUntil  time.Time
 	Preview         DetectionPreview
 	CaptureHidden   bool
 	CaptureRevision uint64
+	Dirty           bool
 }
 
 func NewPanel() *Panel {
@@ -186,8 +236,16 @@ func (p *Panel) Open(snapshot Snapshot, handler func(Command)) error {
 	p.opened = true
 	p.handler = handler
 	p.draft = cloneDraft(snapshot.Settings)
+	p.saved = cloneDraft(p.draft)
 	p.catalog = append([]TaskDescriptor(nil), snapshot.Catalog...)
 	p.status = snapshot.Status
+	p.capabilities = snapshot.Capabilities
+	p.display = snapshot.Display
+	if p.display.Width == 0 {
+		p.display = DefaultDisplayProfile()
+	}
+	p.requestSeq = 0
+	p.pendingStartID = 0
 	p.feedback = ""
 	p.compact = false
 	p.logs = nil
@@ -229,6 +287,41 @@ func (p *Panel) Publish(status RuntimeStatus) error {
 	return nil
 }
 
+// PublishCapabilities updates the host ability snapshot without changing the
+// runtime phase. Catalog availability is published separately so the host can
+// keep task descriptors as the source of task metadata.
+func (p *Panel) PublishCapabilities(caps Capabilities) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened {
+		return nil
+	}
+	p.capabilities = caps
+	return nil
+}
+
+// PublishDisplay updates the screen contract without changing the runtime phase.
+func (p *Panel) PublishDisplay(profile DisplayProfile) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened {
+		return nil
+	}
+	p.display = profile
+	return nil
+}
+
+// PublishCatalog replaces the task directory projection.
+func (p *Panel) PublishCatalog(catalog []TaskDescriptor) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.opened {
+		return nil
+	}
+	p.catalog = append([]TaskDescriptor(nil), catalog...)
+	return nil
+}
+
 // PublishDetectionPreview updates the diagnostic page without changing the
 // runtime phase. Manual inspection never performs an action.
 func (p *Panel) PublishDetectionPreview(frame Frame, detection Detection) error {
@@ -264,6 +357,13 @@ func (p *Panel) PublishDetectionPreviewError(message string) error {
 // PublishPhase updates operator control state without discarding the latest
 // observed scene, frame, or action count.
 func (p *Panel) PublishPhase(phase, outcome, message string) error {
+	return p.PublishCommandResult(0, phase, outcome, message)
+}
+
+// PublishCommandResult is PublishPhase tagged with the command request the
+// host is answering. A matching start request collapses to the pill only after
+// a successful running result; errors keep the control panel open.
+func (p *Panel) PublishCommandResult(requestID uint64, phase, outcome, message string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.opened {
@@ -272,10 +372,17 @@ func (p *Panel) PublishPhase(phase, outcome, message string) error {
 	p.status.Phase = phase
 	p.status.Outcome = outcome
 	p.status.Message = message
+	p.status.RequestID = requestID
 	p.status.UpdatedAt = time.Now().Format(time.RFC3339)
 	p.appendLogLocked(p.status)
 	if message != "" {
 		p.feedback = message
+	}
+	if phase == "idle" && outcome == "stopped" {
+		p.stopExpandGen++
+	}
+	if outcome == "config_saved" {
+		p.saved = cloneDraft(p.draft)
 	}
 	return nil
 }
@@ -421,23 +528,30 @@ func (p *Panel) readFrame() (panelFrame, bool) {
 	if !p.opened {
 		return panelFrame{}, false
 	}
+	p.applyStartConfirmationLocked()
+	p.applyStoppedExpansionLocked()
 	return panelFrame{
-		Draft:           cloneDraft(p.draft),
-		Catalog:         append([]TaskDescriptor(nil), p.catalog...),
+		Draft:           p.draft,
+		Catalog:         p.catalog,
 		Status:          p.status,
 		Feedback:        p.feedback,
 		ActiveTab:       p.activeTab,
 		Compact:         p.compact,
-		Logs:            append([]string(nil), p.logs...),
+		Starting:        p.pendingStartID != 0,
+		Logs:            p.logs,
+		Capabilities:    p.capabilities,
+		Display:         p.display,
 		PillExpanded:    p.pillExpanded,
 		PillExpansion:   p.pillExpansion,
 		PillAnimationAt: p.pillAnimationAt,
 		PillControlsAt:  p.pillControlsAt,
 		PillCollapseAt:  p.pillCollapseAt,
 		PillPointer:     p.pillPointer,
-		Preview:         cloneDetectionPreview(p.preview),
+		ExitArmedUntil:  p.exitArmedUntil,
+		Preview:         p.preview,
 		CaptureHidden:   p.captureHidden,
 		CaptureRevision: p.captureRevision,
+		Dirty:           !DraftsEqual(p.draft, p.saved),
 	}, true
 }
 
@@ -447,21 +561,16 @@ func (p *Panel) writeFrame(frame panelFrame) {
 	if !p.opened {
 		return
 	}
-	p.draft = cloneDraft(frame.Draft)
-	p.feedback = frame.Feedback
+	p.draft = frame.Draft
 	p.activeTab = frame.ActiveTab
 	p.compact = frame.Compact
-	p.logs = append([]string(nil), frame.Logs...)
 	p.pillExpanded = frame.PillExpanded
 	p.pillExpansion = frame.PillExpansion
 	p.pillAnimationAt = frame.PillAnimationAt
 	p.pillControlsAt = frame.PillControlsAt
 	p.pillCollapseAt = frame.PillCollapseAt
 	p.pillPointer = frame.PillPointer
-	if frame.Preview.Revision >= p.preview.Revision {
-		p.preview = cloneDetectionPreview(frame.Preview)
-		p.previewRevision = frame.Preview.Revision
-	}
+	p.exitArmedUntil = frame.ExitArmedUntil
 }
 
 func (p *Panel) publishStatusLocked(status RuntimeStatus) {
@@ -483,6 +592,43 @@ func cloneDetectionPreview(src DetectionPreview) DetectionPreview {
 	return src
 }
 
+func (p *Panel) applyStoppedExpansionLocked() {
+	if p.stopExpandGen == p.appliedStopExpand {
+		return
+	}
+	p.appliedStopExpand = p.stopExpandGen
+	p.compact = false
+	p.resetPillLocked()
+}
+
+func (p *Panel) applyStartConfirmationLocked() {
+	if p.pendingStartID == 0 || p.status.RequestID != p.pendingStartID {
+		return
+	}
+	switch p.status.Outcome {
+	case "config_error", "start_error":
+		p.pendingStartID = 0
+		p.compact = false
+		p.resetPillLocked()
+	case "running", "scheduled_wait", "already_running":
+		if p.status.Phase != "running" && p.status.Phase != "paused" {
+			return
+		}
+		p.pendingStartID = 0
+		p.compact = true
+		p.resetPillLocked()
+	}
+}
+
+func (p *Panel) resetPillLocked() {
+	p.pillExpanded = false
+	p.pillExpansion = 0
+	p.pillAnimationAt = time.Time{}
+	p.pillControlsAt = time.Time{}
+	p.pillCollapseAt = time.Time{}
+	p.pillPointer = pillPointerState{}
+}
+
 func (p *Panel) appendLogLocked(status RuntimeStatus) {
 	line := fmt.Sprintf("%s · %s · 动作 %d", fallback(status.Scene, "unknown"), fallback(status.Outcome, "idle"), status.ActionCount)
 	if len(p.logs) > 0 && p.logs[len(p.logs)-1] == line {
@@ -501,6 +647,13 @@ func (p *Panel) emit(command Command) {
 		return
 	}
 	handler := p.handler
+	if command.RequestID == 0 {
+		p.requestSeq++
+		command.RequestID = p.requestSeq
+	}
+	if command.Type == CommandStart {
+		p.pendingStartID = command.RequestID
+	}
 	if command.Settings != nil {
 		copied := cloneDraft(*command.Settings)
 		command.Settings = &copied
@@ -519,6 +672,8 @@ func phaseLabel(phase string) string {
 		return "已暂停"
 	case "error":
 		return "异常"
+	case "starting":
+		return "启动中"
 	default:
 		return "等待中"
 	}

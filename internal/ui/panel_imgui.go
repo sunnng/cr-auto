@@ -29,6 +29,8 @@ const panelWindowID = "饼干王国自动化控制台###auto-cookie-shell"
 
 const pillWindowID = "##auto-cookie-pill-raw"
 
+const persistScopeHint = "任务开关会写入本机存储。运行模式、安全阈值和任务优先级/单次上限仅本次运行生效。"
+
 var (
 	detectionPreviewTexture         *imgui.Texture
 	detectionPreviewTextureRevision uint64
@@ -63,13 +65,14 @@ func (p *Panel) renderFrame() {
 	}
 
 	colorCount := pushKingdomTheme()
-	// Compacting transforms the existing panel window into the pill instead of
-	// destroying the panel and creating an unrelated window. Keeping the same
-	// ImGui ID preserves the Android overlay's pointer input channel.
+	// Interactive overlay is exclusive: the pill and control panel overlap in
+	// screen space, and the pill hit-tests raw mouse coordinates. Capture
+	// still keeps both window IDs alive as transparent placeholders.
 	var commands []Command
-	commands = renderPill(&frame)
-	if !frame.Compact {
-		commands = append(commands, renderConfigWindow(&frame)...)
+	if frame.Compact {
+		commands = renderPill(&frame)
+	} else {
+		commands = renderConfigWindow(&frame)
 	}
 	imgui.PopStyleColorV(colorCount)
 
@@ -99,19 +102,18 @@ func renderTransparentWindow(windowID string, flags imgui.WindowFlags) {
 }
 
 func syncDetectionPreviewTexture(preview DetectionPreview) {
-	if preview.Image == nil {
-		if detectionPreviewTexture != nil {
-			detectionPreviewTexture.Delete()
-			detectionPreviewTexture = nil
-		}
-		detectionPreviewTextureRevision = 0
-		return
-	}
-	if detectionPreviewTexture != nil && detectionPreviewTextureRevision == preview.Revision {
+	hasTexture := detectionPreviewTexture != nil
+	hasImage := preview.Image != nil
+	if !ShouldRebuildTexture(detectionPreviewTextureRevision, preview.Revision, hasTexture, hasImage) {
 		return
 	}
 	if detectionPreviewTexture != nil {
 		detectionPreviewTexture.Delete()
+		detectionPreviewTexture = nil
+	}
+	if preview.Image == nil {
+		detectionPreviewTextureRevision = 0
+		return
 	}
 	detectionPreviewTexture = imgui.CreateTextureNrgba(preview.Image)
 	detectionPreviewTextureRevision = preview.Revision
@@ -119,8 +121,9 @@ func syncDetectionPreviewTexture(preview DetectionPreview) {
 
 func renderConfigWindow(frame *panelFrame) []Command {
 	styleCount := pushKingdomGeometry()
-	imgui.SetNextWindowSizeV(imgui.Vec2{X: 1160, Y: 780}, imgui.CondAlways)
-	imgui.SetNextWindowPosV(imgui.Vec2{X: 220, Y: 55}, imgui.CondAlways, imgui.Vec2{})
+	x, y, width, height := panelWindowGeometry(frame.Display)
+	imgui.SetNextWindowSizeV(imgui.Vec2{X: width, Y: height}, imgui.CondAlways)
+	imgui.SetNextWindowPosV(imgui.Vec2{X: x, Y: y}, imgui.CondAlways, imgui.Vec2{})
 	imgui.SetNextWindowCollapsedV(false, imgui.CondAlways)
 
 	flags := imgui.WindowFlagsNoMove | imgui.WindowFlagsNoResize |
@@ -139,7 +142,7 @@ func renderConfigWindow(frame *panelFrame) []Command {
 		if frame.ActiveTab == 3 {
 			syncDetectionPreviewTexture(frame.Preview)
 		}
-		renderHeader(frame.Status)
+		renderHeader(frame)
 		imgui.Separator()
 
 		available := imgui.ContentRegionAvail()
@@ -180,7 +183,7 @@ func renderPill(frame *panelFrame) []Command {
 	progress := pillEase(frame.PillExpansion)
 	width := pillLerp(pillCollapsedWidth, pillExpandedWidth, progress)
 	height := pillLerp(pillCollapsedHeight, pillExpandedHeight, progress)
-	windowX := (1600 - width) / 2
+	windowX := (float32(frame.Display.Width) - width) / 2
 	windowY := float32(16)
 	size := imgui.Vec2{X: width, Y: height}
 	visualLayout := expandedPillLayoutForBounds(windowX, windowY, width, height)
@@ -203,6 +206,8 @@ func renderPill(frame *panelFrame) []Command {
 		mouse := imgui.MousePos()
 		point := pillPoint{X: mouse.X, Y: mouse.Y}
 		hovered := visualLayout.body.contains(point)
+		pointerDown := imgui.IsMouseDown(imgui.MouseButtonLeft)
+		refreshPillCollapse(frame, now, hovered || pointerDown)
 		hit := interactionLayout.hit(point)
 		drawPillBody(drawList, visualLayout.body, rounding, hovered || frame.PillExpanded)
 		collapsedAlpha := pillClamp01(1 - progress/0.58)
@@ -215,7 +220,7 @@ func renderPill(frame *panelFrame) []Command {
 		}
 
 		if frame.PillExpanded && !frame.PillCollapseAt.IsZero() && now.After(frame.PillCollapseAt) &&
-			!imgui.IsMouseDown(imgui.MouseButtonLeft) {
+			!hovered && !pointerDown {
 			collapsePill(frame)
 		}
 
@@ -226,6 +231,7 @@ func renderPill(frame *panelFrame) []Command {
 			imgui.IsMouseClickedBoolV(imgui.MouseButtonLeft, false),
 			released,
 			interactionLayout,
+			now,
 		)
 		commands = applyPillHit(frame, action, commands)
 		if frame.PillExpanded && released && action == pillHitNone {
@@ -251,12 +257,14 @@ func drawCollapsedPillContent(drawList *imgui.DrawList, frame *panelFrame, bound
 	countX := bounds.Max.X - 15 - countSize.X
 	drawList.AddTextVec2(imgui.Vec2{X: countX, Y: textY}, imgui.ColorU32Vec4(withPillAlpha(imgui.Vec4{X: 0.95, Y: 0.76, Z: 0.37, W: 1}, alpha)), count)
 
-	logLine := compactPillLogLimit(frame, 22)
+	logLine := FitRunes(compactPillLog(frame), countX-(bounds.Min.X+33), func(s string) float32 {
+		return imgui.CalcTextSize(s).X
+	})
 	drawList.AddTextVec2(imgui.Vec2{X: bounds.Min.X + 33, Y: textY}, imgui.ColorU32Vec4(withPillAlpha(colorCream, alpha)), logLine)
 }
 
 func drawExpandedPillContent(drawList *imgui.DrawList, frame *panelFrame, layout pillLayout, hovered pillHitTarget, alpha float32) {
-	state := pillExpandedState(frame.Status.Phase)
+	state := pillExpandedState(frame.Status.Phase, frame.Status.Outcome)
 	statusColor := pillStatusColor(frame.Status.Phase)
 	infoX := layout.body.Min.X + 17
 	stateY := layout.body.Min.Y + 12
@@ -272,9 +280,11 @@ func drawExpandedPillContent(drawList *imgui.DrawList, frame *panelFrame, layout
 	)
 	drawList.AddTextVec2(imgui.Vec2{X: infoX + 14, Y: stateY}, imgui.ColorU32Vec4(withPillAlpha(statusColor, alpha)), state)
 
-	sceneLine := fmt.Sprintf("场景 %s  ·  %s", fallback(frame.Status.Scene, "未知"), fallback(frame.Status.Outcome, "等待"))
-	drawList.AddTextVec2(imgui.Vec2{X: infoX, Y: sceneY}, imgui.ColorU32Vec4(withPillAlpha(colorMuted, alpha)), limitPillText(sceneLine, 27))
-	drawList.AddTextVec2(imgui.Vec2{X: infoX, Y: detailY}, imgui.ColorU32Vec4(withPillAlpha(colorCream, alpha)), expandedPillDetail(frame))
+	infoMaxX := layout.config.Min.X - 18
+	measure := func(s string) float32 { return imgui.CalcTextSize(s).X }
+	sceneLine := FitRunes(fmt.Sprintf("场景 %s  ·  %s", fallback(frame.Status.Scene, "未知"), fallback(frame.Status.Outcome, "等待")), infoMaxX-infoX, measure)
+	drawList.AddTextVec2(imgui.Vec2{X: infoX, Y: sceneY}, imgui.ColorU32Vec4(withPillAlpha(colorMuted, alpha)), sceneLine)
+	drawList.AddTextVec2(imgui.Vec2{X: infoX, Y: detailY}, imgui.ColorU32Vec4(withPillAlpha(colorCream, alpha)), FitRunes(expandedPillDetail(frame), infoMaxX-infoX, measure))
 
 	count := fmt.Sprintf("动作 %d/%d", frame.Status.ActionCount, frame.Draft.Safety.MaxActionsPerRun)
 	countSize := imgui.CalcTextSize(count)
@@ -291,13 +301,16 @@ func drawExpandedPillContent(drawList *imgui.DrawList, frame *panelFrame, layout
 		1,
 	)
 
+	_, _, primaryEnabled := pillPrimaryAction(frame.Status.Phase, frame.Status.Outcome)
 	primaryIcon := pillIconPlay
-	if frame.Status.Phase == "running" || frame.Status.Phase == "waiting" {
+	if !primaryEnabled {
+		primaryIcon = pillIconWait
+	} else if frame.Status.Phase == "running" || frame.Status.Phase == "waiting" {
 		primaryIcon = pillIconPause
 	}
-	drawPillButton(drawList, layout.config, pillIconConfig, hovered == pillHitConfig, pillButtonConfig, alpha)
-	drawPillButton(drawList, layout.primary, primaryIcon, hovered == pillHitPrimary, pillButtonToggle, alpha)
-	drawPillButton(drawList, layout.stop, pillIconStop, hovered == pillHitStop, pillButtonStop, alpha)
+	drawPillButton(drawList, layout.config, pillIconConfig, hovered == pillHitConfig, pillButtonConfig, false, alpha)
+	drawPillButton(drawList, layout.primary, primaryIcon, hovered == pillHitPrimary && primaryEnabled, pillButtonToggle, !primaryEnabled, alpha)
+	drawPillButton(drawList, layout.stop, pillIconStop, hovered == pillHitStop, pillButtonStop, false, alpha)
 }
 
 func drawPillBody(drawList *imgui.DrawList, bounds pillRect, rounding float32, highlighted bool) {
@@ -331,9 +344,10 @@ const (
 	pillIconPlay
 	pillIconPause
 	pillIconStop
+	pillIconWait
 )
 
-func drawPillButton(drawList *imgui.DrawList, bounds pillRect, icon pillIcon, hovered bool, kind pillButtonKind, alpha float32) {
+func drawPillButton(drawList *imgui.DrawList, bounds pillRect, icon pillIcon, hovered bool, kind pillButtonKind, disabled bool, alpha float32) {
 	background := imgui.Vec4{X: 0.29, Y: 0.20, Z: 0.13, W: 1}
 	textColor := colorCream
 	switch kind {
@@ -347,13 +361,18 @@ func drawPillButton(drawList *imgui.DrawList, bounds pillRect, icon pillIcon, ho
 		background = imgui.Vec4{X: 0.38, Y: 0.17, Z: 0.15, W: 1}
 		textColor = imgui.Vec4{X: 1, Y: 0.87, Z: 0.87, W: 1}
 	}
+	if disabled {
+		background = imgui.Vec4{X: 0.22, Y: 0.20, Z: 0.18, W: 1}
+		textColor = colorMuted
+		hovered = false
+	}
 	if hovered {
 		background.X = pillClamp01(background.X + 0.08)
 		background.Y = pillClamp01(background.Y + 0.06)
 		background.Z = pillClamp01(background.Z + 0.04)
 	}
 	minimum, maximum := pillRectVec(bounds)
-	drawList.AddRectFilledV(minimum, maximum, imgui.ColorU32Vec4(withPillAlpha(background, alpha)), 10, imgui.DrawFlagsRoundCornersAll)
+	drawList.AddRectFilledV(minimum, maximum, imgui.ColorU32Vec4(withPillAlpha(background, alpha)), 14, imgui.DrawFlagsRoundCornersAll)
 	drawPillIcon(drawList, bounds, icon, withPillAlpha(textColor, alpha), withPillAlpha(background, alpha))
 }
 
@@ -408,6 +427,10 @@ func drawPillIcon(drawList *imgui.DrawList, bounds pillRect, icon pillIcon, colo
 			2,
 			imgui.DrawFlagsRoundCornersAll,
 		)
+	case pillIconWait:
+		drawList.AddCircleV(center, 8, iconColor, 16, 2)
+		drawList.AddLineV(center, imgui.Vec2{X: center.X, Y: center.Y - 5}, iconColor, 2)
+		drawList.AddLineV(center, imgui.Vec2{X: center.X + 4, Y: center.Y + 1}, iconColor, 2)
 	}
 }
 
@@ -424,13 +447,8 @@ func pillRectVec(bounds pillRect) (imgui.Vec2, imgui.Vec2) {
 	return imgui.Vec2{X: bounds.Min.X, Y: bounds.Min.Y}, imgui.Vec2{X: bounds.Max.X, Y: bounds.Max.Y}
 }
 
-func compactPillLogLimit(frame *panelFrame, limit int) string {
-	logLine := fmt.Sprintf("%s · %s · %d", fallback(frame.Status.Scene, "unknown"), fallback(frame.Status.Outcome, "idle"), frame.Status.ActionCount)
-	if len(frame.Logs) > 0 {
-		index := int(time.Now().Unix()/3) % len(frame.Logs)
-		logLine = frame.Logs[index]
-	}
-	return limitPillText(logLine, limit)
+func compactPillLog(frame *panelFrame) string {
+	return CompactPillHeadline(frame.Status, frame.Logs)
 }
 
 func expandedPillDetail(frame *panelFrame) string {
@@ -441,7 +459,7 @@ func expandedPillDetail(frame *panelFrame) string {
 	if detail == "" {
 		detail = "等待运行指令"
 	}
-	return limitPillText(detail, 31)
+	return detail
 }
 
 func limitPillText(value string, limit int) string {
@@ -453,19 +471,6 @@ func limitPillText(value string, limit int) string {
 		return string(runes[:limit-1]) + "…"
 	}
 	return value
-}
-
-func pillExpandedState(phase string) string {
-	switch phase {
-	case "running", "waiting":
-		return "自动生产运行中"
-	case "paused":
-		return "脚本已暂停"
-	case "error":
-		return "脚本运行异常"
-	default:
-		return "脚本已停止"
-	}
 }
 
 func pillEase(value float32) float32 {
@@ -505,42 +510,43 @@ func pillStatusColor(phase string) imgui.Vec4 {
 	}
 }
 
+var kingdomTheme = []themeColor{
+	{imgui.ColText, colorCream},
+	{imgui.ColTextDisabled, colorMuted},
+	{imgui.ColWindowBg, imgui.Vec4{X: 0.10, Y: 0.075, Z: 0.06, W: 0.98}},
+	{imgui.ColChildBg, imgui.Vec4{X: 0.14, Y: 0.105, Z: 0.08, W: 1}},
+	{imgui.ColPopupBg, imgui.Vec4{X: 0.14, Y: 0.105, Z: 0.08, W: 1}},
+	{imgui.ColBorder, imgui.Vec4{X: 0.34, Y: 0.26, Z: 0.18, W: 1}},
+	{imgui.ColBorderShadow, imgui.Vec4{X: 0, Y: 0, Z: 0, W: 0.35}},
+	{imgui.ColFrameBg, imgui.Vec4{X: 0.20, Y: 0.15, Z: 0.11, W: 1}},
+	{imgui.ColFrameBgHovered, imgui.Vec4{X: 0.28, Y: 0.21, Z: 0.14, W: 1}},
+	{imgui.ColFrameBgActive, imgui.Vec4{X: 0.34, Y: 0.25, Z: 0.15, W: 1}},
+	{imgui.ColTitleBg, imgui.Vec4{X: 0.16, Y: 0.11, Z: 0.075, W: 1}},
+	{imgui.ColTitleBgActive, imgui.Vec4{X: 0.24, Y: 0.17, Z: 0.095, W: 1}},
+	{imgui.ColTitleBgCollapsed, imgui.Vec4{X: 0.16, Y: 0.11, Z: 0.075, W: 1}},
+	{imgui.ColScrollbarBg, imgui.Vec4{X: 0.10, Y: 0.075, Z: 0.06, W: 0.7}},
+	{imgui.ColScrollbarGrab, imgui.Vec4{X: 0.39, Y: 0.29, Z: 0.18, W: 1}},
+	{imgui.ColScrollbarGrabHovered, imgui.Vec4{X: 0.55, Y: 0.40, Z: 0.22, W: 1}},
+	{imgui.ColScrollbarGrabActive, imgui.Vec4{X: 0.72, Y: 0.52, Z: 0.25, W: 1}},
+	{imgui.ColCheckMark, colorGold},
+	{imgui.ColSliderGrab, imgui.Vec4{X: 0.78, Y: 0.56, Z: 0.25, W: 1}},
+	{imgui.ColSliderGrabActive, colorGold},
+	{imgui.ColButton, imgui.Vec4{X: 0.24, Y: 0.18, Z: 0.12, W: 1}},
+	{imgui.ColButtonHovered, imgui.Vec4{X: 0.35, Y: 0.26, Z: 0.16, W: 1}},
+	{imgui.ColButtonActive, imgui.Vec4{X: 0.47, Y: 0.34, Z: 0.18, W: 1}},
+	{imgui.ColHeader, imgui.Vec4{X: 0.34, Y: 0.24, Z: 0.13, W: 1}},
+	{imgui.ColHeaderHovered, imgui.Vec4{X: 0.46, Y: 0.33, Z: 0.17, W: 1}},
+	{imgui.ColHeaderActive, imgui.Vec4{X: 0.57, Y: 0.41, Z: 0.20, W: 1}},
+	{imgui.ColSeparator, imgui.Vec4{X: 0.34, Y: 0.26, Z: 0.18, W: 0.85}},
+	{imgui.ColSeparatorHovered, imgui.Vec4{X: 0.62, Y: 0.45, Z: 0.22, W: 1}},
+	{imgui.ColSeparatorActive, colorGold},
+}
+
 func pushKingdomTheme() int32 {
-	colors := []themeColor{
-		{imgui.ColText, colorCream},
-		{imgui.ColTextDisabled, colorMuted},
-		{imgui.ColWindowBg, imgui.Vec4{X: 0.10, Y: 0.075, Z: 0.06, W: 0.98}},
-		{imgui.ColChildBg, imgui.Vec4{X: 0.14, Y: 0.105, Z: 0.08, W: 1}},
-		{imgui.ColPopupBg, imgui.Vec4{X: 0.14, Y: 0.105, Z: 0.08, W: 1}},
-		{imgui.ColBorder, imgui.Vec4{X: 0.34, Y: 0.26, Z: 0.18, W: 1}},
-		{imgui.ColBorderShadow, imgui.Vec4{X: 0, Y: 0, Z: 0, W: 0.35}},
-		{imgui.ColFrameBg, imgui.Vec4{X: 0.20, Y: 0.15, Z: 0.11, W: 1}},
-		{imgui.ColFrameBgHovered, imgui.Vec4{X: 0.28, Y: 0.21, Z: 0.14, W: 1}},
-		{imgui.ColFrameBgActive, imgui.Vec4{X: 0.34, Y: 0.25, Z: 0.15, W: 1}},
-		{imgui.ColTitleBg, imgui.Vec4{X: 0.16, Y: 0.11, Z: 0.075, W: 1}},
-		{imgui.ColTitleBgActive, imgui.Vec4{X: 0.24, Y: 0.17, Z: 0.095, W: 1}},
-		{imgui.ColTitleBgCollapsed, imgui.Vec4{X: 0.16, Y: 0.11, Z: 0.075, W: 1}},
-		{imgui.ColScrollbarBg, imgui.Vec4{X: 0.10, Y: 0.075, Z: 0.06, W: 0.7}},
-		{imgui.ColScrollbarGrab, imgui.Vec4{X: 0.39, Y: 0.29, Z: 0.18, W: 1}},
-		{imgui.ColScrollbarGrabHovered, imgui.Vec4{X: 0.55, Y: 0.40, Z: 0.22, W: 1}},
-		{imgui.ColScrollbarGrabActive, imgui.Vec4{X: 0.72, Y: 0.52, Z: 0.25, W: 1}},
-		{imgui.ColCheckMark, colorGold},
-		{imgui.ColSliderGrab, imgui.Vec4{X: 0.78, Y: 0.56, Z: 0.25, W: 1}},
-		{imgui.ColSliderGrabActive, colorGold},
-		{imgui.ColButton, imgui.Vec4{X: 0.24, Y: 0.18, Z: 0.12, W: 1}},
-		{imgui.ColButtonHovered, imgui.Vec4{X: 0.35, Y: 0.26, Z: 0.16, W: 1}},
-		{imgui.ColButtonActive, imgui.Vec4{X: 0.47, Y: 0.34, Z: 0.18, W: 1}},
-		{imgui.ColHeader, imgui.Vec4{X: 0.34, Y: 0.24, Z: 0.13, W: 1}},
-		{imgui.ColHeaderHovered, imgui.Vec4{X: 0.46, Y: 0.33, Z: 0.17, W: 1}},
-		{imgui.ColHeaderActive, imgui.Vec4{X: 0.57, Y: 0.41, Z: 0.20, W: 1}},
-		{imgui.ColSeparator, imgui.Vec4{X: 0.34, Y: 0.26, Z: 0.18, W: 0.85}},
-		{imgui.ColSeparatorHovered, imgui.Vec4{X: 0.62, Y: 0.45, Z: 0.22, W: 1}},
-		{imgui.ColSeparatorActive, colorGold},
+	for i := range kingdomTheme {
+		imgui.PushStyleColorVec4(kingdomTheme[i].index, kingdomTheme[i].value)
 	}
-	for _, color := range colors {
-		imgui.PushStyleColorVec4(color.index, color.value)
-	}
-	return int32(len(colors))
+	return int32(len(kingdomTheme))
 }
 
 func pushKingdomGeometry() int32 {
@@ -603,29 +609,39 @@ func renderTitleBarMinimizeButton() bool {
 	return clicked
 }
 
-func renderHeader(status RuntimeStatus) {
+func renderHeader(frame *panelFrame) {
 	colorText(colorGold, "CR AUTO")
 	imgui.SameLine()
 	imgui.TextUnformatted("饼干王国自动化")
 
-	profile := "CN 1600×900  ·  240dpi"
+	profile := fmt.Sprintf("CN %d×%d  ·  %ddpi", frame.Display.Width, frame.Display.Height, frame.Display.DPI)
 	alignTextRight(profile, 104)
-	colorText(colorMuted, profile)
+	if frame.Display.Width != frame.Display.RequiredWidth || frame.Display.Height != frame.Display.RequiredHeight {
+		colorText(colorRed, profile)
+	} else {
+		colorText(colorMuted, profile)
+	}
 
-	phase := phaseLabel(status.Phase)
-	statusText := "● " + phase + "   场景 " + fallback(status.Scene, "unknown") + "   状态 " + fallback(status.Outcome, "configure")
-	switch status.Phase {
-	case "running":
+	phase := frame.Status.Phase
+	if frame.Starting {
+		phase = "starting"
+	}
+	phaseText := phaseLabel(phase)
+	statusText := "● " + phaseText + "   场景 " + fallback(frame.Status.Scene, "unknown") + "   状态 " + fallback(frame.Status.Outcome, "configure")
+	switch {
+	case frame.Starting:
+		colorText(colorWarning, statusText)
+	case frame.Status.Phase == "running":
 		colorText(colorGreen, statusText)
-	case "error":
+	case frame.Status.Phase == "error":
 		colorText(colorRed, statusText)
-	case "paused":
+	case frame.Status.Phase == "paused":
 		colorText(colorWarning, statusText)
 	default:
 		colorText(colorGold, statusText)
 	}
-	if status.Message != "" {
-		disabledText(status.Message)
+	if frame.Status.Message != "" {
+		disabledText(frame.Status.Message)
 	}
 }
 
@@ -698,7 +714,13 @@ func renderOverview(frame *panelFrame) {
 	imgui.SameLine()
 	renderStatCard("budget", "动作预算", fmt.Sprintf("%d", frame.Draft.Safety.MaxActionsPerRun), "单次运行上限", width, false)
 	imgui.SameLine()
-	renderStatCard("guard", "安全状态", "已锁定", "禁止付费资源", width, false)
+	guardValue := CapabilityStatusLabel(frame.Capabilities.ResourceGuardStatus())
+	guardDetail := "资源消费保护"
+	if frame.Capabilities.ResourceGuardReady && frame.Capabilities.SensitivePageGuardReady {
+		guardValue = "已锁定"
+		guardDetail = "禁止付费资源"
+	}
+	renderStatCard("guard", "安全状态", guardValue, guardDetail, width, false)
 
 	imgui.Spacing()
 	sectionTitle("运行方式", "选择本次脚本的执行策略")
@@ -719,20 +741,33 @@ func renderOverview(frame *panelFrame) {
 
 	if frame.Draft.Run.Mode == RunScheduled {
 		imgui.Spacing()
-		start := int32(frame.Draft.Run.StartMinute)
-		end := int32(frame.Draft.Run.EndMinute)
-		imgui.SetNextItemWidth(520)
-		imgui.SliderIntV("开始分钟##schedule", &start, 0, 1439, "%d", 0)
-		imgui.SetNextItemWidth(520)
-		imgui.SliderIntV("结束分钟##schedule", &end, 0, 1439, "%d", 0)
-		frame.Draft.Run.StartMinute = int(start)
-		frame.Draft.Run.EndMinute = int(end)
-		disabledText("分钟从当天 00:00 起计算，时区固定为 Asia/Shanghai。")
+		startH, startM := SplitClock(frame.Draft.Run.StartMinute)
+		endH, endM := SplitClock(frame.Draft.Run.EndMinute)
+		startHour, startMin := int32(startH), int32(startM)
+		endHour, endMin := int32(endH), int32(endM)
+		startLabel := fmt.Sprintf("%02d:%02d", startH, startM)
+		endLabel := fmt.Sprintf("%02d:%02d", endH, endM)
+		imgui.SetNextItemWidth(240)
+		imgui.SliderIntV("开始 "+startLabel+"##start-hour", &startHour, 0, 23, "%d", 0)
+		imgui.SameLine()
+		imgui.SetNextItemWidth(240)
+		imgui.SliderIntV("分##start-min", &startMin, 0, 59, "%d", 0)
+		imgui.SetNextItemWidth(240)
+		imgui.SliderIntV("结束 "+endLabel+"##end-hour", &endHour, 0, 23, "%d", 0)
+		imgui.SameLine()
+		imgui.SetNextItemWidth(240)
+		imgui.SliderIntV("分##end-min", &endMin, 0, 59, "%d", 0)
+		frame.Draft.Run.StartMinute = JoinClock(int(startHour), int(startMin))
+		frame.Draft.Run.EndMinute = JoinClock(int(endHour), int(endMin))
+		disabledText("按当天时:分编辑，时区固定为 Asia/Shanghai；结束不能早于开始。")
 	}
 
 	imgui.Spacing()
-	if availableTasks == 0 {
-		renderWarning("安全观察模式", "任务目录尚未配置，启动后不会点击游戏。")
+	gate := EvaluateStart(frame.Capabilities, frame.Draft, frame.Catalog)
+	if !gate.Allowed {
+		renderWarning("暂不可启动", strings.Join(gate.Reasons, "；"))
+	} else if availableTasks == 0 {
+		renderWarning("安全观察模式", "当前没有可启用的任务，启动后不会点击游戏。")
 	} else {
 		renderSuccess("任务已就绪", fmt.Sprintf("当前有 %d 个任务可安全启用。", availableTasks))
 	}
@@ -774,6 +809,7 @@ func modeButton(title, detail, id string, active bool, width float32) bool {
 
 func renderTasks(frame *panelFrame) {
 	renderWarning("任务准入规则", "只有经过验证的任务才会出现在目录中。")
+	disabledText(persistScopeHint)
 	imgui.Spacing()
 	for _, descriptor := range frame.Catalog {
 		task := frame.Draft.Tasks[descriptor.ID]
@@ -841,9 +877,22 @@ func renderTasks(frame *panelFrame) {
 }
 
 func renderSafety(frame *panelFrame) {
-	renderSuccess("强制安全锁已启用", "资源消费拦截与敏感页面停机不可关闭。")
+	if frame.Capabilities.ResourceGuardReady && frame.Capabilities.SensitivePageGuardReady {
+		renderSuccess("强制安全锁已启用", "资源消费拦截与敏感页面停机不可关闭。")
+	} else {
+		renderWarning("安全能力未就绪", "资源消费保护与敏感页面停机尚未接入引擎。当前不拦截启动；命中购买确认或敏感页时不会自动停机。")
+	}
+	imgui.Spacing()
+	sectionTitle("当前能力", "以下状态来自当前设备与引擎，而不是面板开关")
+	renderCapabilityRow("图色识别", frame.Capabilities.VisionStatus())
+	renderCapabilityRow("设备 OCR", frame.Capabilities.OCRStatus())
+	renderCapabilityRow("资源消费保护", frame.Capabilities.ResourceGuardStatus())
+	renderCapabilityRow("敏感页面停机", frame.Capabilities.SensitivePageGuardStatus())
+	renderCapabilityRow("设备分辨率", frame.Capabilities.DeviceProfileStatus())
+
 	imgui.Spacing()
 	sectionTitle("识别与动作限制", "降低阈值会增加误操作风险")
+	disabledText(persistScopeHint)
 
 	confidence := frame.Draft.Safety.MinConfidence
 	maxActions := int32(frame.Draft.Safety.MaxActionsPerRun)
@@ -866,6 +915,19 @@ func renderSafety(frame *panelFrame) {
 	imgui.Checkbox("禁止消耗水晶、现金与付费资源", &frame.Draft.Safety.BlockResourceSpend)
 	imgui.Checkbox("进入账号、支付等敏感页面立即停止", &frame.Draft.Safety.StopOnSensitivePage)
 	imgui.EndDisabled()
+}
+
+func renderCapabilityRow(label string, status CapabilityStatus) {
+	imgui.TextUnformatted(label)
+	imgui.SameLine()
+	switch status {
+	case CapabilityEnabled:
+		colorText(colorGreen, "● "+CapabilityStatusLabel(status))
+	case CapabilityPending:
+		colorText(colorWarning, "● "+CapabilityStatusLabel(status))
+	default:
+		colorText(colorRed, "● "+CapabilityStatusLabel(status))
+	}
 }
 
 func renderDetectionPreview(frame *panelFrame) []Command {
@@ -895,7 +957,7 @@ func renderDetectionPreview(frame *panelFrame) []Command {
 				imgui.Vec2{X: 0, Y: 0},
 				imgui.Vec2{X: 1, Y: 1},
 			)
-			drawDetectionOverlay(imgui.WindowDrawList(), imagePos, imageSize, preview.Detection)
+			drawDetectionOverlay(imgui.WindowDrawList(), imagePos, imageSize, preview.Detection, preview.Image.Bounds().Dx(), preview.Image.Bounds().Dy())
 		} else {
 			renderWarning("暂无识别帧", "点击右侧“立即识别”采集一张只读截图。")
 		}
@@ -997,11 +1059,12 @@ func renderDetectionPreview(frame *panelFrame) []Command {
 	return nil
 }
 
-func drawDetectionOverlay(drawList *imgui.DrawList, origin, size imgui.Vec2, detection Detection) {
+func drawDetectionOverlay(drawList *imgui.DrawList, origin, size imgui.Vec2, detection Detection, imageW, imageH int) {
+	sx, sy := OverlayScale(imageW, imageH, size.X, size.Y)
 	toScreen := func(x, y int) imgui.Vec2 {
 		return imgui.Vec2{
-			X: origin.X + float32(x)*size.X/1600,
-			Y: origin.Y + float32(y)*size.Y/900,
+			X: origin.X + float32(x)*sx,
+			Y: origin.Y + float32(y)*sy,
 		}
 	}
 	for _, anchor := range detection.Anchors {
@@ -1034,8 +1097,8 @@ func drawDetectionOverlay(drawList *imgui.DrawList, origin, size imgui.Vec2, det
 			color = colorGreen
 		}
 		center := toScreen(slot.X, slot.Y)
-		width := size.X * 42 / 1600
-		height := size.Y * 42 / 900
+		width := 42 * sx
+		height := 42 * sy
 		drawList.AddRectV(
 			imgui.Vec2{X: center.X - width/2, Y: center.Y - height/2},
 			imgui.Vec2{X: center.X + width/2, Y: center.Y + height/2},
@@ -1049,20 +1112,38 @@ func drawDetectionOverlay(drawList *imgui.DrawList, origin, size imgui.Vec2, det
 
 func renderFooter(frame *panelFrame) []Command {
 	var commands []Command
+	gate := EvaluateStart(frame.Capabilities, frame.Draft, frame.Catalog)
 	if err := frame.Draft.Validate(); err != nil {
 		colorText(colorRed, "配置校验失败："+err.Error())
+	} else if frame.Starting {
+		colorText(colorWarning, "正在启动…")
+	} else if !gate.Allowed {
+		colorText(colorRed, strings.Join(gate.Reasons, "；"))
 	} else if frame.Feedback != "" {
 		colorText(colorGreen, frame.Feedback)
-	} else {
-		disabledText("修改保存在草稿中；启动前会再次校验并写入本机存储。")
 	}
+	if frame.Dirty {
+		colorText(colorWarning, "有未保存修改")
+	} else {
+		colorText(colorGreen, "已保存")
+	}
+	disabledText(persistScopeHint)
 
 	buttonRowX := imgui.WindowWidth() - 610
 	if buttonRowX > imgui.CursorPosX() {
 		imgui.SetCursorPosX(buttonRowX)
 	}
-	if centeredButton("退出", "footer-exit", imgui.Vec2{X: 92, Y: 42}, colorCream) {
-		commands = append(commands, Command{Type: CommandStop})
+	exitLabel := "退出脚本"
+	now := time.Now()
+	if !frame.ExitArmedUntil.IsZero() && now.Before(frame.ExitArmedUntil) {
+		exitLabel = "再点一次退出"
+	}
+	if centeredButton(exitLabel, "footer-exit", imgui.Vec2{X: 128, Y: 42}, colorCream) {
+		if confirmExit(frame, now, true) {
+			commands = append(commands, Command{Type: CommandExit})
+		}
+	} else {
+		confirmExit(frame, now, false)
 	}
 	imgui.SameLine()
 	if centeredButton("诊断截图", "footer-diagnostic", imgui.Vec2{X: 128, Y: 42}, colorCream) {
@@ -1074,13 +1155,12 @@ func renderFooter(frame *panelFrame) []Command {
 		commands = append(commands, Command{Type: CommandSave, Settings: &cfg})
 	}
 	imgui.SameLine()
-	valid := frame.Draft.Validate() == nil
+	valid := frame.Draft.Validate() == nil && gate.Allowed && !frame.Starting
 	imgui.BeginDisabledV(!valid)
 	pushGoldButton()
 	if centeredButton("保存并启动", "footer-save-start", imgui.Vec2{X: 190, Y: 42}, colorDarkInk) {
 		cfg := cloneDraft(frame.Draft)
 		commands = append(commands, Command{Type: CommandStart, Settings: &cfg})
-		minimizeToPill(frame)
 	}
 	imgui.PopStyleColorV(4)
 	imgui.EndDisabled()

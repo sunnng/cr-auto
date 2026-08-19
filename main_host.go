@@ -8,13 +8,16 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"app/internal/config"
 	"app/internal/core"
 	"app/internal/game"
 	"app/internal/lib/color"
 	"app/internal/lib/logger"
+	"app/internal/lib/ocr"
 	"app/internal/lib/touch"
 	"app/internal/lib/userconfig"
 	"app/internal/ui"
@@ -89,13 +92,18 @@ func untilRunWindowStart(now time.Time, startMinute, endMinute int) time.Duratio
 	return target.Sub(now)
 }
 
+// FrameSource 诊断截图来源（设备端为截图隐身 + CaptureScreen）。
+type FrameSource interface {
+	Capture() (*image.NRGBA, error)
+}
+
 // Host 面板命令与平台生命周期的宿主接线：把 ui.Command 与 apkctl 事件
 // 翻译成对引擎（core.Runtime）的控制。设备适配（截图/触控/日志/状态）在
 // main 启动时注入；Host 本身不依赖 AutoGo，可桌面测试。
 type Host struct {
 	panel       *ui.Panel
-	frameSource color.FrameSource // 识别诊断的帧来源（截图隐身握手在适配器内完成）
-	diagDir     string            // 诊断截图保存目录
+	frameSource FrameSource // 识别诊断预览/存档截图（截图隐身握手在适配器内完成）
+	diagDir     string      // 诊断截图保存目录
 
 	mu          sync.Mutex
 	rt          *core.Runtime
@@ -108,19 +116,72 @@ type Host struct {
 	// 测试/诊断注入点。
 	nowFn           func() time.Time
 	observeInterval time.Duration // 场景观测间隔（安全策略用）
+
+	capabilitiesProbe  func() ui.Capabilities
+	deviceProfileValid bool
+	startRequestID     uint64
 }
 
 func NewHost(panel *ui.Panel) *Host {
 	return &Host{
-		panel:           panel,
-		diagDir:         defaultDiagnosticDir,
-		nowFn:           time.Now,
-		observeInterval: 3 * time.Second,
+		panel:              panel,
+		diagDir:            defaultDiagnosticDir,
+		nowFn:              time.Now,
+		observeInterval:    3 * time.Second,
+		deviceProfileValid: true,
+	}
+}
+
+// SetCapabilitiesProbe 覆盖默认能力探测（测试注入完整能力，或设备端叠加分辨率校验）。
+func (h *Host) SetCapabilitiesProbe(fn func() ui.Capabilities) {
+	h.capabilitiesProbe = fn
+}
+
+// SetDeviceProfileValid 发布设备分辨率是否匹配打包契约。
+func (h *Host) SetDeviceProfileValid(ok bool) {
+	h.mu.Lock()
+	h.deviceProfileValid = ok
+	h.mu.Unlock()
+}
+
+// profileFromDevice 把设备宽高/DPI 填进 DisplayProfile；契约尺寸来自打包配置。
+// 宽或高为 0 时保持未知尺寸，不得把缺失读数当成已满足 1600×900。
+// 旋转后的 900×1600 视为不匹配。
+func profileFromDevice(width, height, dpi int) ui.DisplayProfile {
+	p := ui.DefaultDisplayProfile()
+	p.RequiredWidth = config.Static.Display.Width
+	p.RequiredHeight = config.Static.Display.Height
+	p.Width, p.Height, p.DPI = width, height, dpi
+	p.SafeMaxX, p.SafeMaxY = p.Width, p.Height
+	return p
+}
+
+// CurrentCapabilities 当前宿主能力快照（控制面板与启动门禁共用）。
+func (h *Host) CurrentCapabilities() ui.Capabilities {
+	if h.capabilitiesProbe != nil {
+		return h.capabilitiesProbe()
+	}
+	caps := detectCapabilities()
+	h.mu.Lock()
+	caps.DeviceProfileValid = h.deviceProfileValid
+	h.mu.Unlock()
+	return caps
+}
+
+// detectCapabilities 按实际注入的适配器报告能力。安全守卫是否就绪取决于
+// 特征库是否已采集，未采集时不得把开关画成“已启用”。
+func detectCapabilities() ui.Capabilities {
+	return ui.Capabilities{
+		OCRReady:                ocr.Ready(),
+		VisionReady:             color.Ready(),
+		ResourceGuardReady:      game.SafetyGuardsReady(),
+		SensitivePageGuardReady: game.SafetyGuardsReady(),
+		DeviceProfileValid:      true,
 	}
 }
 
 // SetFrameSource 注入识别诊断帧来源（设备端为“截图隐身 + CaptureScreen”适配器）。
-func (h *Host) SetFrameSource(src color.FrameSource) { h.frameSource = src }
+func (h *Host) SetFrameSource(src FrameSource) { h.frameSource = src }
 
 // SetDiagnosticDir 覆盖诊断截图保存目录（默认 data/diagnostics）。
 func (h *Host) SetDiagnosticDir(dir string) {
@@ -133,7 +194,7 @@ func (h *Host) SetDiagnosticDir(dir string) {
 func (h *Host) Handle(command ui.Command) {
 	switch command.Type {
 	case ui.CommandStart:
-		h.start(command.Settings)
+		h.start(command.Settings, command.RequestID)
 	case ui.CommandPause:
 		h.pause()
 	case ui.CommandResume:
@@ -141,7 +202,7 @@ func (h *Host) Handle(command ui.Command) {
 	case ui.CommandStop:
 		h.stop()
 	case ui.CommandSave:
-		h.saveSettings(command.Settings)
+		h.saveSettings(command.Settings, command.RequestID)
 	case ui.CommandDiagnostic:
 		h.diagnostic()
 	case ui.CommandInspect:
@@ -151,17 +212,30 @@ func (h *Host) Handle(command ui.Command) {
 	}
 }
 
-// taskDescriptors 面板任务目录：把 9 个已注册任务的元数据发布为 ui.TaskDescriptor。
-func taskDescriptors() []ui.TaskDescriptor {
+func (h *Host) publishResult(requestID uint64, phase, outcome, message string) {
+	_ = h.panel.PublishCommandResult(requestID, phase, outcome, message)
+}
+
+func (h *Host) currentStartRequestID() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.startRequestID
+}
+
+// taskDescriptors 面板任务目录：把已注册任务的元数据发布为 ui.TaskDescriptor，
+// 可用性由宿主能力快照决定（M2b 任务均依赖 OCR）。
+func taskDescriptors(caps ui.Capabilities) []ui.TaskDescriptor {
 	metas := game.Catalog()
 	descriptors := make([]ui.TaskDescriptor, 0, len(metas))
 	for _, meta := range metas {
+		available, reason := ui.TaskAvailability(caps, true)
 		descriptors = append(descriptors, ui.TaskDescriptor{
-			ID:          meta.ID,
-			Name:        meta.Name,
-			Description: meta.Description,
-			Available:   true,
-			MaxRuns:     meta.MaxRuns,
+			ID:                meta.ID,
+			Name:              meta.Name,
+			Description:       meta.Description,
+			Available:         available,
+			UnavailableReason: reason,
+			MaxRuns:           meta.MaxRuns,
 		})
 	}
 	return descriptors
@@ -186,12 +260,12 @@ func initialSettings() ui.Draft {
 }
 
 // saveSettings 处理“保存配置”命令：面板草稿的任务开关写入 userconfig。
-func (h *Host) saveSettings(settings *ui.Draft) {
+func (h *Host) saveSettings(settings *ui.Draft, requestID uint64) {
 	if settings == nil {
-		h.panel.PublishPhase("idle", "config_error", "缺少配置内容")
+		h.publishResult(requestID, "idle", "config_error", "缺少配置内容")
 		return
 	}
-	if !h.applySettings(*settings) {
+	if !h.applySettings(*settings, requestID) {
 		return
 	}
 	phase, message := "idle", "配置已保存"
@@ -199,14 +273,14 @@ func (h *Host) saveSettings(settings *ui.Draft) {
 		// 引擎侧 UserConfig 缓存随 RegisterAll 加载，运行中保存需重启后生效。
 		phase, message = "running", "配置已保存（引擎重启后生效）"
 	}
-	h.panel.PublishPhase(phase, "config_saved", message)
+	h.publishResult(requestID, phase, "config_saved", message)
 }
 
 // applySettings 校验面板草稿并把任务开关合并写入 userconfig；
 // 校验或落盘失败时发布错误并返回 false。
-func (h *Host) applySettings(settings ui.Draft) bool {
+func (h *Host) applySettings(settings ui.Draft, requestID uint64) bool {
 	if err := settings.Validate(); err != nil {
-		h.panel.PublishPhase("idle", "config_error", "配置校验失败："+err.Error())
+		h.publishResult(requestID, "idle", "config_error", "配置校验失败："+err.Error())
 		return false
 	}
 	switches := make(map[string]bool, len(settings.Tasks))
@@ -214,7 +288,7 @@ func (h *Host) applySettings(settings ui.Draft) bool {
 		switches[id] = setting.Enabled
 	}
 	if err := game.ApplyTaskSwitches(userconfig.Default(), switches); err != nil {
-		h.panel.PublishPhase("idle", "config_error", "保存配置失败："+err.Error())
+		h.publishResult(requestID, "idle", "config_error", "保存配置失败："+err.Error())
 		return false
 	}
 	return true
@@ -246,7 +320,7 @@ func (h *Host) inspect() {
 		ID:         h.nextFrameID(),
 		CapturedAt: time.Now(),
 		Image:      frame,
-	}, toUIDetection(game.DetectScene(frame)))
+	}, toUIDetection(game.DetectScene()))
 }
 
 func (h *Host) captureFrame() (*image.NRGBA, error) {
@@ -333,25 +407,35 @@ func (h *Host) isRunning() bool {
 
 // start 启动引擎：先应用面板草稿（若有），再按运行模式启动；
 // 计划时段未到窗口时先进入等待，窗口开始时自动启动引擎。
-func (h *Host) start(settings *ui.Draft) {
+func (h *Host) start(settings *ui.Draft, requestID uint64) {
+	draft := ui.Default()
 	if settings != nil {
-		if !h.applySettings(*settings) {
+		draft = *settings
+		if !h.applySettings(draft, requestID) {
 			return
 		}
 	}
-	policy := runPolicyFrom(settings)
+	caps := h.CurrentCapabilities()
+	gate := ui.EvaluateStart(caps, draft, taskDescriptors(caps))
+	if !gate.Allowed {
+		h.publishResult(requestID, "idle", "start_error", strings.Join(gate.Reasons, "；"))
+		return
+	}
 
 	h.mu.Lock()
 	if h.running {
 		h.mu.Unlock()
+		h.publishResult(requestID, "running", "already_running", "引擎已在运行")
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.running = true
 	h.stopReason = ""
 	h.cancel = cancel
+	h.startRequestID = requestID
 	h.mu.Unlock()
 
+	policy := runPolicyFrom(settings)
 	if policy.mode == ui.RunScheduled && !inRunWindow(h.nowFn(), policy.startMinute, policy.endMinute) {
 		go h.waitForRunWindow(ctx, cancel, policy)
 		return
@@ -362,7 +446,7 @@ func (h *Host) start(settings *ui.Draft) {
 // waitForRunWindow 计划时段等待：窗口开始前按 1 秒步进轮询；取消时结束运行。
 // 窗口到达后由 startEngine 接手运行状态（本 goroutine 不再调用 finishRun）。
 func (h *Host) waitForRunWindow(ctx context.Context, cancel context.CancelFunc, policy runPolicy) {
-	h.panel.PublishPhase("running", "scheduled_wait", "等待计划时段开始（"+modeLabel(policy.mode)+"）")
+	h.publishResult(h.currentStartRequestID(), "running", "scheduled_wait", "等待计划时段开始（"+modeLabel(policy.mode)+"）")
 	for {
 		if ctx.Err() != nil {
 			h.finishRun("计划等待已取消")
@@ -407,6 +491,10 @@ func (h *Host) startEngine(ctx context.Context, cancel context.CancelFunc, polic
 	}
 
 	rt := core.NewRuntime(core.RuntimeOptions{})
+	game.SetSafetyStop(func(reason string) {
+		h.setStopReason(reason)
+		cancel()
+	})
 	rt.Register = func() {
 		game.RegisterAll(rt.Scheduler, rt.Guard)
 		applySessionTaskPolicies(rt.Scheduler, policy.tasks)
@@ -434,9 +522,9 @@ func (h *Host) startEngine(ctx context.Context, cancel context.CancelFunc, polic
 		_ = rt.Run(ctx)
 		h.finishRun("引擎已停止")
 	}()
-	h.panel.PublishPhase("running", "running", "引擎已启动（"+modeLabel(policy.mode)+"）")
+	h.publishResult(h.currentStartRequestID(), "running", "running", "引擎已启动（"+modeLabel(policy.mode)+"）")
 
-	if h.frameSource != nil && policy.unknownTimeoutSec > 0 {
+	if policy.unknownTimeoutSec > 0 {
 		go h.runObserver(ctx, cancel, policy)
 	}
 }
@@ -462,11 +550,7 @@ func (h *Host) runObserver(ctx context.Context, cancel context.CancelFunc, polic
 				cancel()
 				return
 			}
-			frame, err := h.captureFrame()
-			if err != nil {
-				continue
-			}
-			detection := game.DetectScene(frame)
+			detection := game.DetectScene()
 			now := h.nowFn()
 			if detection.Best == "" || detection.Confidence < policy.minConfidence {
 				if unknownSince.IsZero() {
@@ -519,6 +603,7 @@ func (h *Host) currentActionCount() int {
 // finishRun 运行结束清理：清除触控钩子、复位运行状态并发布停止消息。
 func (h *Host) finishRun(message string) {
 	touch.SetActionHook(nil)
+	game.SetSafetyStop(nil)
 	h.mu.Lock()
 	h.running = false
 	h.rt = nil
@@ -534,8 +619,12 @@ func (h *Host) finishRun(message string) {
 func (h *Host) pause() {
 	h.mu.Lock()
 	rt := h.rt
+	running := h.running
 	h.mu.Unlock()
 	if rt == nil {
+		if running {
+			h.panel.PublishPhase("running", "scheduled_wait", "计划等待中，无法暂停")
+		}
 		return
 	}
 	rt.Pause()

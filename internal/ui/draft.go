@@ -151,3 +151,49 @@ func cloneDraft(src Draft) Draft {
 	}
 	return dst
 }
+
+func SplitClock(minute int) (hour, min int) {
+	if minute < 0 {
+		minute = 0
+	}
+	if minute > 1439 {
+		minute = 1439
+	}
+	return minute / 60, minute % 60
+}
+
+func JoinClock(hour, min int) int {
+	if hour < 0 {
+		hour = 0
+	}
+	if hour > 23 {
+		hour = 23
+	}
+	if min < 0 {
+		min = 0
+	}
+	if min > 59 {
+		min = 59
+	}
+	total := hour*60 + min
+	if total > 1439 {
+		return 1439
+	}
+	return total
+}
+
+func DraftsEqual(a, b Draft) bool {
+	if a.Run != b.Run || a.Safety != b.Safety {
+		return false
+	}
+	if len(a.Tasks) != len(b.Tasks) {
+		return false
+	}
+	for id, task := range a.Tasks {
+		other, ok := b.Tasks[id]
+		if !ok || other != task {
+			return false
+		}
+	}
+	return true
+}

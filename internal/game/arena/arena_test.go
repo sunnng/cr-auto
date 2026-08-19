@@ -2,9 +2,7 @@ package arena
 
 import (
 	"image"
-	"image/color"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,38 +12,9 @@ import (
 	"app/internal/lib/ocr"
 	"app/internal/lib/store"
 	"app/internal/lib/touch"
-	"app/internal/vision"
 )
 
 // ============ 测试辅助 ============
-
-type fakeFrame struct{ img *image.NRGBA }
-
-func (f *fakeFrame) Capture() (*image.NRGBA, error) { return f.img, nil }
-
-func frameOf(points ...string) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
-	for _, spec := range points {
-		for _, chunk := range strings.Split(spec, ",") {
-			parts := strings.Split(chunk, "|")
-			if len(parts) < 3 {
-				continue
-			}
-			x, _ := strconv.Atoi(parts[0])
-			y, _ := strconv.Atoi(parts[1])
-			hex := parts[2]
-			if dash := strings.LastIndex(hex, "-"); dash >= 0 {
-				hex = hex[:dash]
-			}
-			rgb, err := strconv.ParseUint(hex, 16, 32)
-			if err != nil {
-				continue
-			}
-			img.SetNRGBA(x, y, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 0xff})
-		}
-	}
-	return img
-}
 
 type touchRecorder struct {
 	mu     sync.Mutex
@@ -82,10 +51,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -98,7 +70,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -106,8 +78,6 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	})
 	return rec
 }
-
-func fSpec(f vision.Feature) string { return f.Points }
 
 // ============ 会话测试 ============
 
@@ -171,7 +141,7 @@ func TestHudTextCapFormat(t *testing.T) {
 
 func TestArenaPageDetection(t *testing.T) {
 	features := FeatureLib()
-	setupTest(t, frameOf(fSpec(features.Lobby.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Lobby.Feature), nil)
 	if !IsLobby() {
 		t.Fatal("lobby feature must be detected")
 	}

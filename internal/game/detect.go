@@ -2,7 +2,6 @@
 package game
 
 import (
-	"image"
 	"sort"
 
 	"app/internal/game/arena"
@@ -12,6 +11,7 @@ import (
 	"app/internal/game/seaside"
 	"app/internal/game/square"
 	"app/internal/game/starlight"
+	"app/internal/lib/color"
 	"app/internal/vision"
 )
 
@@ -88,54 +88,54 @@ type SceneDetection struct {
 	Anchors []vision.PointResult
 }
 
-// DetectScene 在 frame 上扫描全部注册场景，返回置信度最高的场景与全部候选
-// （按置信度降序）。无任何场景命中或帧为空时 Best 为空串、Anchors 为空。
-func DetectScene(frame *image.NRGBA) SceneDetection {
-	if frame == nil {
-		return SceneDetection{}
-	}
+// DetectScene 扫描全部注册场景，返回置信度最高的场景与全部候选（按置信度降序）。
+// 无任何场景命中时 Best 为空串、Anchors 为空。
+func DetectScene() SceneDetection {
+	var detection SceneDetection
+	color.Session(func() {
+		var best sceneDef
+		var bestPoints []vision.PointResult
+		bestScore := float32(0)
+		candidates := make([]SceneCandidate, 0, len(sceneRegistry))
 
-	var best sceneDef
-	var bestPoints []vision.PointResult
-	bestScore := float32(0)
-	candidates := make([]SceneCandidate, 0, len(sceneRegistry))
-
-	for _, scene := range sceneRegistry {
-		matched, total, score, points := sceneScore(frame, scene)
-		if total == 0 || score <= 0 {
-			continue
+		for _, scene := range sceneRegistry {
+			matched, total, score, points := sceneScore(scene)
+			if total == 0 || score <= 0 {
+				continue
+			}
+			candidates = append(candidates, SceneCandidate{
+				Key:     scene.Key,
+				Matched: matched,
+				Total:   total,
+				Score:   score,
+			})
+			if score > bestScore {
+				bestScore = score
+				best = scene
+				bestPoints = points
+			}
 		}
-		candidates = append(candidates, SceneCandidate{
-			Key:     scene.Key,
-			Matched: matched,
-			Total:   total,
-			Score:   score,
-		})
-		if score > bestScore {
-			bestScore = score
-			best = scene
-			bestPoints = points
+
+		sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+
+		if len(candidates) == 0 {
+			return
 		}
-	}
-
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
-
-	if len(candidates) == 0 {
-		return SceneDetection{}
-	}
-	return SceneDetection{
-		Best:       best.Key,
-		Confidence: bestScore,
-		Candidates: candidates,
-		Anchors:    bestPoints,
-	}
+		detection = SceneDetection{
+			Best:       best.Key,
+			Confidence: bestScore,
+			Candidates: candidates,
+			Anchors:    bestPoints,
+		}
+	})
+	return detection
 }
 
 // sceneScore 计算单个场景的（命中数, 总点数, 置信度, 逐点结果）；
 // 场景含多个特征时取置信度最高的特征。置信度 = 命中数 / 总点数。
-func sceneScore(frame *image.NRGBA, scene sceneDef) (matched, total int, score float32, points []vision.PointResult) {
+func sceneScore(scene sceneDef) (matched, total int, score float32, points []vision.PointResult) {
 	for _, feature := range scene.Features {
-		results, _ := vision.MatchPoints(frame, feature)
+		results, _ := color.MatchPoints(feature)
 		if len(results) == 0 {
 			continue
 		}

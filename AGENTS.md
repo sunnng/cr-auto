@@ -11,12 +11,12 @@ Cookie Run: Kingdom (CRK) automation bot built on [AutoGo](https://autogo.cc/), 
 
 ## Repo layout
 
-- Root module `app`: `main.go` boots the ImGui panel, consumes its `Command`s, injects device adapters (截图隐身 frame source, AutoGo motion/log), and hosts the engine runtime (`main_host.go`, desktop-testable).
+- Root module `app`: `main.go` boots the ImGui panel, consumes its `Command`s, injects device adapters (AutoGo 图色 + 截图隐身, AutoGo motion/log), and hosts the engine runtime (`main_host.go`, desktop-testable).
 - `internal/ui/`: self-contained ImGui control panel + floating pill HUD, migrated from auto-cookie. Imports no domain package; hosts publish state via `Publish*` and consume user actions as `Command`s. `panel_imgui.go` (`//go:build android && cgo`) is the real renderer, `panel_nocgo.go` is the desktop stub — **desktop-testable**: `go test ./internal/ui`.
-- `internal/vision/`: frame-based pure Go 比色/找色 (ADR-0003) — parses `"x|y|rrggbb-偏色"` 特征库 strings + sim, `FindMultiColor` region search. No AutoGo screen APIs; desktop-testable with saved frames.
+- `internal/vision/`: 特征库色点格式与 AutoGo 图色色串转换（ADR-0004）— `"x|y|rrggbb-偏色"` → `DetectsMultiColors` / `FindDef` → `FindMultiColors`。不含像素扫描。
 - `internal/core/`: engine domain ported 结构直译 from the Lua project's `core/` — 守卫 `guard.go`, 调度器 `scheduler.go` (tasks + idle providers), 状态机 `statemachine.go` (KEEP/RETRY/DONE runner), 主循环 `runtime.go`. All desktop-testable.
-- `internal/game/`: `taskbuilder.go` (standard task wrapper: 开关/就绪/让渡/离开广场) + `register.go` (M1 skeleton; M2a 注入网络联机状态不稳定守卫 + 矿山模块; M2b 全量业务模块). `catalog.go` 任务目录元数据 + 面板任务开关 ↔ userconfig 接线（`Catalog`/`ApplyTaskSwitches`/`LoadTaskSwitches`）；`detect.go` 识别诊断场景扫描（`DetectScene`，场景键与 `internal/ui` 的 SceneID 同步，由 main 包测试守护）。`kingdom/`/`popup/` 通用页（特征库+页面）；`mine/` 矿山特征库与首页；`mine/route/` 王国↔矿山路由（涉及勘查/开采页的路由因 Go 包循环限制随使用方存放）；`mine/{survey,mining,battle,jelly}/` 各矿山模块（页面/会话/任务，均桌面可测）。
-- `internal/lib/`: 结构直译 from Lua `lib/` — `color.go` (frame facade over vision), `touch.go` (seam-injected AutoGo motion), `store.go` (JSON 会话存储), `userconfig.go` (defaults + persisted merge), `logger.go`/`status.go` (injectable sinks).
+- `internal/game/`: `taskbuilder.go` (standard task wrapper: 开关/就绪/让渡/离开广场) + `register.go` (M1 skeleton; M2a 注入网络联机状态不稳定守卫 + 矿山模块; M2b 全量业务模块). `catalog.go` 任务目录元数据 + 面板任务开关 ↔ userconfig 接线（`Catalog`/`ApplyTaskSwitches`/`LoadTaskSwitches`）；`detect.go` 识别诊断场景扫描（`DetectScene` 走 color.MatchPoints，场景键与 `internal/ui` 的 SceneID 同步，由 main 包测试守护）。`kingdom/`/`popup/` 通用页（特征库+页面）；`mine/` 矿山特征库与首页；`mine/route/` 王国↔矿山路由（涉及勘查/开采页的路由因 Go 包循环限制随使用方存放）；`mine/{survey,mining,battle,jelly}/` 各矿山模块（页面/会话/任务，均桌面可测）。
+- `internal/lib/`: 结构直译 from Lua `lib/` — `color.go` (Screen 接缝：设备端 AutoGo 图色，桌面 `ScriptedScreen`), `touch.go` (seam-injected AutoGo motion), `store.go` (JSON 会话存储), `userconfig.go` (defaults + persisted merge), `logger.go`/`status.go` (injectable sinks).
 - `internal/config/`: 打包常量 (display/runtime/user defaults), mirrors `config.lua`.
 - `AutoGo/`: local copy of the AutoGo SDK (`github.com/Dasongzi1366/AutoGo`, wired in via `replace`). Treat as third-party — don't edit; update through the plugin's SDK update feature.
 - `CONTEXT.md`: UI-layer domain glossary (Chinese, with terms to avoid); `docs/adr/`: architectural decisions.

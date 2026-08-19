@@ -81,10 +81,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -97,7 +100,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -142,17 +145,17 @@ func TestSessionExpiredBusyReady(t *testing.T) {
 func TestPageDetection(t *testing.T) {
 	features := mine.Mining()
 
-	setupTest(t, frameOf(fSpec(features.Page.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Page.Feature), nil)
 	if !IsMiningPage() {
 		t.Fatal("mining page feature must be detected")
 	}
 
-	setupTest(t, frameOf(fSpec(features.SetupFeature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.SetupFeature), nil)
 	if !IsSetup() {
 		t.Fatal("setup feature must be detected")
 	}
 
-	setupTest(t, frameOf(fSpec(features.SetupReadyFeature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.SetupReadyFeature), nil)
 	if !IsSetupReady() {
 		t.Fatal("setupReady feature must be detected")
 	}
@@ -161,13 +164,12 @@ func TestPageDetection(t *testing.T) {
 func TestPageCompletedTaskFindAndTap(t *testing.T) {
 	// 完成标记特征：画锚点 + 全部相对色点。
 	completed := mine.Mining().CompletedTask
-	img := frameOf()
-	paintFindDef(img, completed, 100, 150)
-	setupTest(t, img, nil)
+	s := libcolor.NewScriptedScreen().FindAt(completed, image.Pt(100, 150))
+	setupTest(t, s, nil)
 	if !HasCompletedTask() {
 		t.Fatal("completed task must be found")
 	}
-	rec := setupTest(t, img, nil)
+	rec := setupTest(t, s, nil)
 	if !TapCompletedSlot() {
 		t.Fatal("tapCompletedSlot must succeed")
 	}
@@ -201,7 +203,7 @@ func paintFindDef(img *image.NRGBA, def vision.FindDef, ax, ay int) {
 
 func TestPageFreeSlotDetection(t *testing.T) {
 	// freeLocationFeature 首色 c67654，锚点需满足全部相对色点（简化：只画锚点不画偏移 → 不命中）。
-	setupTest(t, frameOf("100|200|c67654-000000"), nil)
+	setupTest(t, libcolor.NewScriptedScreen(), nil)
 	if HasFreeSlot() {
 		t.Fatal("free slot without offsets must not be found")
 	}
@@ -252,21 +254,14 @@ func TestResolveCardPriorityUsesConfigAndDefaults(t *testing.T) {
 func TestReturnToKingdomFromMineHome(t *testing.T) {
 	home := mine.MineHome()
 	kingdomHome := kingdom.Home()
-	// 点击返回后帧切换为王国首页 → Wait 立即命中。
-	rec := &touchRecorder{}
-	fs := &switchableFrame{get: func() *image.NRGBA {
+	s := libcolor.NewScriptedScreen()
+	rec := setupTest(t, s, nil)
+	s.DetectsFn = func(colors string, sim float32) bool {
 		if len(rec.taps()) > 0 {
-			return frameOf(fSpec(kingdomHome.Feature))
+			return colors == vision.DetectsColors(kingdomHome.Feature)
 		}
-		return frameOf(fSpec(home.Feature))
-	}}
-	setupTest(t, nil, nil)
-	libcolor.SetFrameSource(fs)
-	touch.SetPerform(touch.Perform{
-		Tap:    rec.tap,
-		Random: func(min, max int) int { return 0 },
-		Sleep:  func(ms int) {},
-	})
+		return colors == vision.DetectsColors(home.Feature)
+	}
 
 	if !ReturnToKingdom() {
 		t.Fatal("ReturnToKingdom must succeed from mine home")
@@ -274,15 +269,4 @@ func TestReturnToKingdomFromMineHome(t *testing.T) {
 	if len(rec.taps()) != 1 {
 		t.Fatalf("mine home back tap expected, got %+v", rec.taps())
 	}
-}
-
-type switchableFrame struct {
-	mu  sync.Mutex
-	get func() *image.NRGBA
-}
-
-func (s *switchableFrame) Capture() (*image.NRGBA, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.get(), nil
 }

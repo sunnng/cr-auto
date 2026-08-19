@@ -80,10 +80,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -96,7 +99,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -129,11 +132,11 @@ func TestBattleSessionCooldown(t *testing.T) {
 
 func TestBattlePageDetection(t *testing.T) {
 	features := mine.Battle()
-	setupTest(t, frameOf(fSpec(features.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Feature), nil)
 	if !IsBattlePage() {
 		t.Fatal("battle page feature must be detected")
 	}
-	setupTest(t, frameOf(), nil)
+	setupTest(t, libcolor.NewScriptedScreen(), nil)
 	if IsBattlePage() {
 		t.Fatal("empty frame must not be battle page")
 	}
@@ -142,9 +145,8 @@ func TestBattlePageDetection(t *testing.T) {
 func TestBattlePageFindQuickButton(t *testing.T) {
 	features := mine.Battle()
 	// 画锚点 + 偏移点。
-	img := frameOf()
-	paintFindDef(img, features.QuickBattleBtn, 560, 760)
-	setupTest(t, img, nil)
+	s := libcolor.NewScriptedScreen().FindAt(features.QuickBattleBtn, image.Pt(560, 760))
+	setupTest(t, s, nil)
 	x, y, ok := FindQuickBattleButton()
 	if !ok {
 		t.Fatal("quick battle button must be found")
@@ -178,9 +180,8 @@ func TestReadClockCount(t *testing.T) {
 func TestRecognizeSoulStoneType(t *testing.T) {
 	features := mine.Battle()
 	// 妖精王（史诗）特征：画锚点 + 偏移。
-	img := frameOf()
-	paintFindDef(img, features.SoulStones["史诗"]["妖精王"], 300, 650)
-	setupTest(t, img, nil)
+	s := libcolor.NewScriptedScreen().FindAt(features.SoulStones["史诗"]["妖精王"], image.Pt(300, 650))
+	setupTest(t, s, nil)
 	if got := RecognizeSoulStoneType(map[string]bool{"妖精王": true}); got != "妖精王" {
 		t.Fatalf("soul stone = %q", got)
 	}

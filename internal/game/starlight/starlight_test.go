@@ -2,10 +2,7 @@ package starlight
 
 import (
 	"image"
-	"image/color"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 
@@ -13,38 +10,9 @@ import (
 	"app/internal/lib/ocr"
 	"app/internal/lib/store"
 	"app/internal/lib/touch"
-	"app/internal/vision"
 )
 
 // ============ 测试辅助 ============
-
-type fakeFrame struct{ img *image.NRGBA }
-
-func (f *fakeFrame) Capture() (*image.NRGBA, error) { return f.img, nil }
-
-func frameOf(points ...string) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
-	for _, spec := range points {
-		for _, chunk := range strings.Split(spec, ",") {
-			parts := strings.Split(chunk, "|")
-			if len(parts) < 3 {
-				continue
-			}
-			x, _ := strconv.Atoi(parts[0])
-			y, _ := strconv.Atoi(parts[1])
-			hex := parts[2]
-			if dash := strings.LastIndex(hex, "-"); dash >= 0 {
-				hex = hex[:dash]
-			}
-			rgb, err := strconv.ParseUint(hex, 16, 32)
-			if err != nil {
-				continue
-			}
-			img.SetNRGBA(x, y, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 0xff})
-		}
-	}
-	return img
-}
 
 type touchRecorder struct {
 	mu     sync.Mutex
@@ -81,10 +49,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -97,7 +68,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -105,8 +76,6 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	})
 	return rec
 }
-
-func fSpec(f vision.Feature) string { return f.Points }
 
 // ============ 会话测试 ============
 
@@ -129,19 +98,19 @@ func TestSessionDoneTodayLifecycle(t *testing.T) {
 
 func TestStarlightPageDetection(t *testing.T) {
 	features := FeatureLib()
-	setupTest(t, frameOf(fSpec(features.Home.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Home.Feature), nil)
 	if !IsHomePage() {
 		t.Fatal("home feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.Manual.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Manual.Feature), nil)
 	if !IsManualPage() {
 		t.Fatal("manual feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.Vanilla.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Vanilla.Feature), nil)
 	if !IsVanillaIslandPage() {
 		t.Fatal("vanilla feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.Task.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Task.Feature), nil)
 	if !IsTaskPage() {
 		t.Fatal("task feature must be detected")
 	}
@@ -150,32 +119,10 @@ func TestStarlightPageDetection(t *testing.T) {
 func TestFindClaimableBtn(t *testing.T) {
 	features := FeatureLib()
 	def := features.Task.ClaimableBtn
-	setupTest(t, frameOf(frameForFindDef(def)), nil)
+	s := libcolor.NewScriptedScreen().FindAt(def, image.Pt(def.Region.Min.X, def.Region.Min.Y))
+	setupTest(t, s, nil)
 	x, y, ok := FindClaimableBtn()
 	if !ok || x != def.Region.Min.X || y != def.Region.Min.Y {
 		t.Fatalf("claimable btn at (%d,%d) ok=%v want (%d,%d)", x, y, ok, def.Region.Min.X, def.Region.Min.Y)
 	}
-}
-
-// frameForFindDef 生成含找色定义锚点+偏移色点的帧（管道分隔偏移串）。
-func frameForFindDef(def vision.FindDef) string {
-	first := strings.Split(def.FirstColor, "|")[0]
-	hex := first
-	if dash := strings.LastIndex(hex, "-"); dash >= 0 {
-		hex = hex[:dash]
-	}
-	var out []string
-	out = append(out, strconv.Itoa(def.Region.Min.X)+"|"+strconv.Itoa(def.Region.Min.Y)+"|"+hex)
-	// 偏移串形如 "dx|dy|color|dx|dy|color..."。
-	fields := strings.Split(def.OffsetColors, "|")
-	for i := 0; i+2 < len(fields); i += 3 {
-		dx, _ := strconv.Atoi(fields[i])
-		dy, _ := strconv.Atoi(fields[i+1])
-		colorHex := fields[i+2]
-		if dash := strings.LastIndex(colorHex, "-"); dash >= 0 {
-			colorHex = colorHex[:dash]
-		}
-		out = append(out, strconv.Itoa(def.Region.Min.X+dx)+"|"+strconv.Itoa(def.Region.Min.Y+dy)+"|"+colorHex)
-	}
-	return strings.Join(out, ",")
 }

@@ -1,66 +1,39 @@
 package game
 
 import (
-	"image"
-	"image/color"
-	"strconv"
-	"strings"
 	"testing"
 
 	"app/internal/game/kingdom"
 	"app/internal/game/mine"
 	"app/internal/game/popup"
+	libcolor "app/internal/lib/color"
 	"app/internal/vision"
 )
 
-// paintPointSpecs 把特征串的色点原样画到帧上（识别诊断测试用）。
-func paintPointSpecs(img *image.NRGBA, spec string) {
-	for _, chunk := range strings.Split(spec, ",") {
-		parts := strings.Split(chunk, "|")
-		if len(parts) < 3 {
-			continue
-		}
-		x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-		if err != nil {
-			continue
-		}
-		y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil {
-			continue
-		}
-		hex := strings.TrimSpace(parts[2])
-		if dash := strings.LastIndex(hex, "-"); dash >= 0 {
-			hex = hex[:dash]
-		}
-		rgb, err := strconv.ParseUint(hex, 16, 32)
-		if err != nil {
-			continue
-		}
-		img.SetNRGBA(x, y, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 0xff})
-	}
-}
-
-func frameFromFeature(f vision.Feature) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
-	paintPointSpecs(img, f.Points)
-	return img
+func installDetectScreen(t *testing.T, s libcolor.Screen) {
+	t.Helper()
+	libcolor.SetScreen(s)
+	t.Cleanup(func() { libcolor.SetScreen(nil) })
 }
 
 func TestDetectSceneNilAndBlankFrame(t *testing.T) {
-	d := DetectScene(nil)
+	installDetectScreen(t, nil)
+	d := DetectScene()
 	if d.Best != "" || d.Confidence != 0 || len(d.Candidates) != 0 || len(d.Anchors) != 0 {
-		t.Fatalf("nil frame must detect nothing, got %+v", d)
+		t.Fatalf("no screen must detect nothing, got %+v", d)
 	}
 
-	d = DetectScene(image.NewNRGBA(image.Rect(0, 0, 1600, 900)))
+	installDetectScreen(t, libcolor.NewScriptedScreen())
+	d = DetectScene()
 	if d.Best != "" || d.Confidence != 0 || len(d.Candidates) != 0 {
-		t.Fatalf("blank frame must detect nothing, got %+v", d)
+		t.Fatalf("empty screen must detect nothing, got %+v", d)
 	}
 }
 
 func TestDetectSceneKingdomHome(t *testing.T) {
-	img := frameFromFeature(kingdom.Home().Feature)
-	d := DetectScene(img)
+	f := kingdom.Home().Feature
+	installDetectScreen(t, libcolor.HitFeatures(f))
+	d := DetectScene()
 	if d.Best != SceneKingdomHome {
 		t.Fatalf("best scene=%q want %q", d.Best, SceneKingdomHome)
 	}
@@ -81,30 +54,36 @@ func TestDetectSceneKingdomHome(t *testing.T) {
 }
 
 func TestDetectSceneUnstableNetwork(t *testing.T) {
-	img := frameFromFeature(popup.UnstableNetworkDef().Feature)
-	d := DetectScene(img)
+	installDetectScreen(t, libcolor.HitFeatures(popup.UnstableNetworkDef().Feature))
+	d := DetectScene()
 	if d.Best != SceneUnstableNetwork {
 		t.Fatalf("best scene=%q want %q", d.Best, SceneUnstableNetwork)
 	}
 }
 
 func TestDetectSceneMineVentureDomain(t *testing.T) {
-	img := frameFromFeature(mine.MineVenture().Setup.Feature)
-	d := DetectScene(img)
+	installDetectScreen(t, libcolor.HitFeatures(mine.MineVenture().Setup.Feature))
+	d := DetectScene()
 	if d.Best != SceneMineVenture {
 		t.Fatalf("best scene=%q want %q", d.Best, SceneMineVenture)
 	}
 }
 
 func TestDetectScenePartialMatchScoresByRatio(t *testing.T) {
-	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
-	points := strings.Split(kingdom.Home().Feature.Points, ",")
-	if len(points) < 2 {
+	pts, err := vision.ParsePoints(kingdom.Home().Feature.Points)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pts) < 2 {
 		t.Fatal("kingdom home feature needs at least two points")
 	}
-	paintPointSpecs(img, strings.Join(points[:len(points)/2], ","))
+	s := libcolor.NewScriptedScreen()
+	for _, p := range pts[:len(pts)/2] {
+		s.HitPoint(p)
+	}
+	installDetectScreen(t, s)
 
-	d := DetectScene(img)
+	d := DetectScene()
 	if d.Best != SceneKingdomHome {
 		t.Fatalf("best scene=%q want %q", d.Best, SceneKingdomHome)
 	}

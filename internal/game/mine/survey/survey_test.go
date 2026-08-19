@@ -69,10 +69,13 @@ func (t *touchRecorder) taps() []image.Point {
 }
 
 // setupTest 注入假帧、触控、OCR 与存储；返回触控记录器。
-func setupTest(t *testing.T, frame *image.NRGBA) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -82,7 +85,7 @@ func setupTest(t *testing.T, frame *image.NRGBA) *touchRecorder {
 	store.SetDefault(store.New(filepath.Join(t.TempDir(), "store.json")))
 	ocr.SetEngine(&fakeOcrEngine{})
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -138,19 +141,15 @@ func TestSessionExpiredRecordReady(t *testing.T) {
 
 // ============ 页面测试 ============
 
-func ventureDomainFrames() []string {
-	v := mine.MineVenture()
-	return []string{fSpec(v.Setup.Feature), fSpec(v.Ready.Feature), fSpec(v.Running.Feature), fSpec(v.Settle.Feature)}
-}
-
 func TestPageDetectsVentureDomain(t *testing.T) {
-	for _, spec := range ventureDomainFrames() {
-		setupTest(t, frameOf(spec))
+	v := mine.MineVenture()
+	for _, f := range []vision.Feature{v.Setup.Feature, v.Ready.Feature, v.Running.Feature, v.Settle.Feature} {
+		setupTest(t, libcolor.HitFeatures(f))
 		if !IsMineVentureDomain() {
-			t.Fatalf("must detect venture domain for %s", spec)
+			t.Fatalf("must detect venture domain for %s", f.Points)
 		}
 	}
-	setupTest(t, frameOf())
+	setupTest(t, nil)
 	if IsMineVentureDomain() {
 		t.Fatal("empty frame must not be venture domain")
 	}
@@ -158,7 +157,7 @@ func TestPageDetectsVentureDomain(t *testing.T) {
 
 func TestPageRunningAndStop(t *testing.T) {
 	running := mine.MineVenture().Running
-	setupTest(t, frameOf(fSpec(running.Feature)))
+	setupTest(t, libcolor.HitFeatures(running.Feature))
 	if !IsRunning() {
 		t.Fatal("running page must be detected")
 	}
@@ -169,25 +168,25 @@ func TestPageRunningAndStop(t *testing.T) {
 func TestResolveInitialStateByPage(t *testing.T) {
 	cfg := mineCfgForTest()
 
-	setupTest(t, frameOf(fSpec(mine.MineHome().Feature)))
+	setupTest(t, libcolor.HitFeatures(mine.MineHome().Feature))
 	state, remain, run := resolveInitialState(cfg)
 	if !run || state != "navigate" || remain != 0 {
 		t.Fatalf("mine home → navigate: state=%q remain=%d run=%v", state, remain, run)
 	}
 
-	setupTest(t, frameOf(fSpec(kingdom.Home().Feature)))
+	setupTest(t, libcolor.HitFeatures(kingdom.Home().Feature))
 	state, _, run = resolveInitialState(cfg)
 	if !run || state != "navigate" {
 		t.Fatalf("kingdom home → navigate: state=%q run=%v", state, run)
 	}
 
-	setupTest(t, frameOf(fSpec(mine.MineVenture().Ready.Feature)))
+	setupTest(t, libcolor.HitFeatures(mine.MineVenture().Ready.Feature))
 	state, _, run = resolveInitialState(cfg)
 	if !run || state != "prepare" {
 		t.Fatalf("venture domain → prepare: state=%q run=%v", state, run)
 	}
 
-	setupTest(t, frameOf())
+	setupTest(t, nil)
 	state, _, run = resolveInitialState(cfg)
 	if !run || state != "detect" {
 		t.Fatalf("unknown page → detect: state=%q run=%v", state, run)
@@ -195,7 +194,7 @@ func TestResolveInitialStateByPage(t *testing.T) {
 }
 
 func TestResolveInitialStateFarWaitBlocks(t *testing.T) {
-	setupTest(t, frameOf(fSpec(mine.MineHome().Feature)))
+	setupTest(t, libcolor.HitFeatures(mine.MineHome().Feature))
 	EnterFarWait(600)
 	state, remain, run := resolveInitialState(mineCfgForTest())
 	if run || state != "" || remain <= 0 {

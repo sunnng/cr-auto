@@ -2,10 +2,7 @@ package square
 
 import (
 	"image"
-	"image/color"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,38 +11,7 @@ import (
 	"app/internal/lib/ocr"
 	"app/internal/lib/store"
 	"app/internal/lib/touch"
-	"app/internal/vision"
 )
-
-// ============ 测试辅助 ============
-
-type fakeFrame struct{ img *image.NRGBA }
-
-func (f *fakeFrame) Capture() (*image.NRGBA, error) { return f.img, nil }
-
-func frameOf(points ...string) *image.NRGBA {
-	img := image.NewNRGBA(image.Rect(0, 0, 1600, 900))
-	for _, spec := range points {
-		for _, chunk := range strings.Split(spec, ",") {
-			parts := strings.Split(chunk, "|")
-			if len(parts) < 3 {
-				continue
-			}
-			x, _ := strconv.Atoi(parts[0])
-			y, _ := strconv.Atoi(parts[1])
-			hex := parts[2]
-			if dash := strings.LastIndex(hex, "-"); dash >= 0 {
-				hex = hex[:dash]
-			}
-			rgb, err := strconv.ParseUint(hex, 16, 32)
-			if err != nil {
-				continue
-			}
-			img.SetNRGBA(x, y, color.NRGBA{R: uint8(rgb >> 16), G: uint8(rgb >> 8), B: uint8(rgb), A: 0xff})
-		}
-	}
-	return img
-}
 
 type touchRecorder struct {
 	mu     sync.Mutex
@@ -83,10 +49,13 @@ func (f *fakeOcr) FindTapPoint(text string, rect image.Rectangle) (int, int, boo
 	return 0, 0, false
 }
 
-func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
+func setupTest(t *testing.T, hits libcolor.Screen, eng *fakeOcr) *touchRecorder {
 	t.Helper()
 	rec := &touchRecorder{}
-	libcolor.SetFrameSource(&fakeFrame{img: frame})
+	if hits == nil {
+		hits = libcolor.NewScriptedScreen()
+	}
+	libcolor.SetScreen(hits)
 	libcolor.SetSleep(func(ms int) {})
 	touch.SetPerform(touch.Perform{
 		Tap:    rec.tap,
@@ -99,7 +68,7 @@ func setupTest(t *testing.T, frame *image.NRGBA, eng *fakeOcr) *touchRecorder {
 	}
 	ocr.SetEngine(eng)
 	t.Cleanup(func() {
-		libcolor.SetFrameSource(nil)
+		libcolor.SetScreen(nil)
 		libcolor.SetSleep(nil)
 		touch.SetPerform(touch.Perform{})
 		store.SetDefault(nil)
@@ -116,8 +85,6 @@ type fixedNow struct {
 func (f *fixedNow) advance(d time.Duration) {
 	f.t = f.t.Add(d)
 }
-
-func fSpec(f vision.Feature) string { return f.Points }
 
 // ============ 会话测试 ============
 
@@ -188,11 +155,11 @@ func TestSessionCheckedToday(t *testing.T) {
 
 func TestSquarePageDetection(t *testing.T) {
 	features := FeatureLib()
-	setupTest(t, frameOf(fSpec(features.Home.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.Home.Feature), nil)
 	if !IsCurrent() {
 		t.Fatal("home feature must be detected")
 	}
-	setupTest(t, frameOf(fSpec(features.DialogLeave.Feature)), nil)
+	setupTest(t, libcolor.HitFeatures(features.DialogLeave.Feature), nil)
 	if !IsLeaveDialog() {
 		t.Fatal("dialog feature must be detected")
 	}
@@ -204,7 +171,7 @@ func TestReadRewardSum(t *testing.T) {
 		features.DialogLeave.RewardNowOcr:   "120",
 		features.DialogLeave.RewardTotalOcr: "80",
 	}}
-	setupTest(t, frameOf(fSpec(features.DialogLeave.Feature)), eng)
+	setupTest(t, libcolor.HitFeatures(features.DialogLeave.Feature), eng)
 	pending, total, sum, ok := ReadRewardSum()
 	if !ok || pending != 120 || total != 80 || sum != 200 {
 		t.Fatalf("reward sum=(%d,%d,%d) ok=%v want (120,80,200)", pending, total, sum, ok)

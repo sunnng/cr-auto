@@ -2,7 +2,7 @@ package core
 
 import (
 	"context"
-	"image"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,25 +10,6 @@ import (
 	"app/internal/lib/status"
 	"app/internal/vision"
 )
-
-// frameSourceSeq 顺序帧来源（耗尽后重复最后一帧）。
-type frameSourceSeq struct {
-	frames []*image.NRGBA
-	idx    int
-}
-
-func (f *frameSourceSeq) Capture() (*image.NRGBA, error) {
-	frame := f.frames[f.idx]
-	if f.idx < len(f.frames)-1 {
-		f.idx++
-	}
-	return frame, nil
-}
-
-// blackFrame 10x10 黑帧。
-func blackFrame() *image.NRGBA {
-	return redFrameAt()
-}
 
 // installStatusSink 记录 status 发布序列。
 func installStatusSink(t *testing.T) func() []status.Update {
@@ -270,13 +251,26 @@ func TestRuntimeCancelStopsLoop(t *testing.T) {
 }
 
 func TestRuntimeWiresGuardHookIntoColorWait(t *testing.T) {
-	// 帧序列：第 0 帧（轮首守卫扫描）与第 1 帧（任务内首次识别）无弹窗，
-	// 第 2 帧起弹窗出现 —— 只能由 wait 分片内的 TickGuard（= Guard.Check）命中。
-	frames := []*image.NRGBA{blackFrame(), blackFrame(), redFrameAt(1001), redFrameAt(1001)}
-	color.SetFrameSource(&frameSourceSeq{frames: frames})
+	popup := vision.Feature{Points: "1|1|ff0000-000000"}
+	waitFeat := vision.Feature{Points: "2|2|00ff00-000000"}
+	popupColors := vision.DetectsColors(popup)
+	waitColors := vision.DetectsColors(waitFeat)
+	var n atomic.Int32
+	s := color.NewScriptedScreen()
+	s.DetectsFn = func(colors string, sim float32) bool {
+		cur := n.Add(1)
+		if colors == waitColors {
+			return false
+		}
+		if colors == popupColors {
+			return cur >= 3
+		}
+		return false
+	}
+	color.SetScreen(s)
 	color.SetSleep(func(ms int) {})
 	defer func() {
-		color.SetFrameSource(nil)
+		color.SetScreen(nil)
 		color.SetSleep(nil)
 	}()
 
